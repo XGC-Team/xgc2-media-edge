@@ -1,0 +1,263 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_version:
+        description: Expected .xgc2/product.yml version
+        required: true
+        type: string
+      expected_source_sha:
+        description: Expected source commit SHA
+        required: true
+        type: string
+      prepare_action:
+        description: Release-train action
+        required: false
+        default: release
+        type: choice
+        options: [release, compatibility-verify]
+      apt_overlay_url:
+        description: Optional release-scoped staging APT base URL
+        required: false
+        default: ""
+        type: string
+      dependency_set_digest:
+        description: SHA256 of the resolved release-train dependency set
+        required: false
+        default: ""
+        type: string
+      run_cpp_quality:
+        description: Compatibility input; this product has no C++ source
+        required: true
+        default: false
+        type: boolean
+      run_source_tests:
+        description: Run Go source tests and race detector
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  XGC2_APT_OVERLAY_URL: ${{ inputs.apt_overlay_url }}
+  XGC2_DEPENDENCY_SET_DIGEST: ${{ inputs.dependency_set_digest }}
+
+jobs:
+  prepare-contract:
+    name: Validate prepare contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate release-train inputs
+        env:
+          PREPARE_ACTION: ${{ inputs.prepare_action }}
+          APT_OVERLAY_URL: ${{ inputs.apt_overlay_url }}
+          DEPENDENCY_SET_DIGEST: ${{ inputs.dependency_set_digest }}
+        run: |
+          set -euo pipefail
+          case "${PREPARE_ACTION}" in
+            release|compatibility-verify) ;;
+            *)
+              echo "unsupported prepare_action: ${PREPARE_ACTION}" >&2
+              exit 1
+              ;;
+          esac
+          if [[ -n "${DEPENDENCY_SET_DIGEST}" &&
+                ! "${DEPENDENCY_SET_DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "dependency_set_digest must be empty or 64 lowercase hex characters" >&2
+            exit 1
+          fi
+          if [[ -n "${APT_OVERLAY_URL}" && -z "${DEPENDENCY_SET_DIGEST}" ]]; then
+            echo "apt_overlay_url requires a dependency_set_digest" >&2
+            exit 1
+          fi
+
+  release-guard:
+    name: Validate immutable release inputs
+    needs: prepare-contract
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Validate version and source
+        run: |
+          set -euo pipefail
+          product_version="$(awk -F': *' '/^version:/ {print $2; exit}' .xgc2/product.yml)"
+          test "${product_version}" = "${{ inputs.expected_version }}"
+          test "$(git rev-parse HEAD)" = "${{ inputs.expected_source_sha }}"
+
+  package-compliance:
+    name: Package compliance
+    needs: release-guard
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Check package contract
+        run: |
+          set -euo pipefail
+          git diff --check HEAD
+          ./.xgc2/scripts/check_package_compliance.sh
+
+  cpp-quality:
+    if: ${{ inputs.run_cpp_quality }}
+    needs: release-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm C++ gate is not applicable
+        run: echo "xgc2-media-edge contains no C++ source."
+
+  source-tests:
+    if: ${{ inputs.run_source_tests }}
+    needs: release-guard
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run Go quality gates
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l cmd internal)"
+          go vet ./...
+          go test ./...
+          go test -race ./...
+          ./.xgc2/scripts/build.sh
+
+  deb-build-and-smoke:
+    name: Debian ${{ matrix.distribution }} ${{ matrix.architecture }}
+    needs:
+      - release-guard
+      - package-compliance
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distribution: focal
+            image: ubuntu:20.04
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - distribution: focal
+            image: ubuntu:20.04
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - distribution: jammy
+            image: ubuntu:22.04
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - distribution: jammy
+            image: ubuntu:22.04
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - distribution: noble
+            image: ubuntu:24.04
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - distribution: noble
+            image: ubuntu:24.04
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Install package tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            dpkg-dev fakeroot file
+
+      - name: Build deb
+        env:
+          PACKAGE_DISTRIBUTION: ${{ matrix.distribution }}
+        run: |
+          set -euo pipefail
+          test "$(dpkg --print-architecture)" = "${{ matrix.architecture }}"
+          ./.xgc2/scripts/build_deb.sh
+
+      - name: Runtime-smoke package in its Ubuntu release
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --platform "${{ matrix.platform }}" \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            "${{ matrix.image }}" \
+            bash -lc '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends ca-certificates file
+              apt-get install -y ./debs/xgc2-media-edge_*.deb
+              ./.xgc2/scripts/smoke_test_installed.sh
+            '
+
+      - name: Create release-train build manifest
+        run: |
+          set -euo pipefail
+          install -d .ci/build-manifests
+          python3 .xgc2/scripts/xgc2_artifact_manifest.py build \
+            --deb-dir debs \
+            --output-dir .ci/build-manifests \
+            --product xgc2-media-edge \
+            --product-version "${{ inputs.expected_version }}" \
+            --distribution "${{ matrix.distribution }}" \
+            --architecture "${{ matrix.architecture }}" \
+            --source-sha "${{ inputs.expected_source_sha }}" \
+            --ci-run-id "${GITHUB_RUN_ID}" \
+            --ci-workflow "${GITHUB_WORKFLOW}" \
+            --ci-workflow-ref "${GITHUB_WORKFLOW_REF}"
+
+      - name: Upload trusted deb artifact
+        if: ${{ inputs.prepare_action == 'release' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xgc2-media-edge-${{ matrix.distribution }}-${{ matrix.architecture }}
+          path: |
+            debs/*.deb
+            .ci/build-manifests/*.json
+          retention-days: 14
+          include-hidden-files: true

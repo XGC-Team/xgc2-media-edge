@@ -1,0 +1,169 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-tests:
+    name: Go build, tests, and race detector
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Check and test source
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l cmd internal)"
+          go vet ./...
+          go test ./...
+          go test -race ./...
+          ./.xgc2/scripts/build.sh
+          ./.ci/bin/xgc-media-edge --version
+
+  package-compliance:
+    name: Package compliance
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Check whitespace and package contract
+        run: |
+          set -euo pipefail
+          git diff --check HEAD
+          ./.xgc2/scripts/check_package_compliance.sh
+
+  deb-build-and-smoke:
+    name: Debian ${{ matrix.distribution }} ${{ matrix.architecture }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distribution: focal
+            image: ubuntu:20.04
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - distribution: focal
+            image: ubuntu:20.04
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - distribution: jammy
+            image: ubuntu:22.04
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - distribution: jammy
+            image: ubuntu:22.04
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - distribution: noble
+            image: ubuntu:24.04
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - distribution: noble
+            image: ubuntu:24.04
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Install package tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            dpkg-dev fakeroot file
+
+      - name: Build deb
+        env:
+          PACKAGE_DISTRIBUTION: ${{ matrix.distribution }}
+        run: |
+          set -euo pipefail
+          test "$(dpkg --print-architecture)" = "${{ matrix.architecture }}"
+          ./.xgc2/scripts/build_deb.sh
+
+      - name: Runtime-smoke package in its Ubuntu release
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --platform "${{ matrix.platform }}" \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            "${{ matrix.image }}" \
+            bash -lc '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends ca-certificates file
+              apt-get install -y ./debs/xgc2-media-edge_*.deb
+              ./.xgc2/scripts/smoke_test_installed.sh
+            '
+
+      - name: Create trusted build manifest
+        run: |
+          set -euo pipefail
+          install -d .ci/build-manifests
+          product_version="$(awk -F': *' '/^version:/ {print $2; exit}' .xgc2/product.yml)"
+          python3 .xgc2/scripts/xgc2_artifact_manifest.py build \
+            --deb-dir debs \
+            --output-dir .ci/build-manifests \
+            --product xgc2-media-edge \
+            --product-version "${product_version}" \
+            --distribution "${{ matrix.distribution }}" \
+            --architecture "${{ matrix.architecture }}" \
+            --source-sha "${GITHUB_SHA}" \
+            --ci-run-id "${GITHUB_RUN_ID}" \
+            --ci-workflow "${GITHUB_WORKFLOW}" \
+            --ci-workflow-ref "${GITHUB_WORKFLOW_REF}"
+
+      - name: Upload trusted deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xgc2-media-edge-${{ matrix.distribution }}-${{ matrix.architecture }}
+          path: |
+            debs/*.deb
+            .ci/build-manifests/*.json
+          retention-days: 14
+          include-hidden-files: true
