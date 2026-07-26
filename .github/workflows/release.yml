@@ -152,9 +152,7 @@ jobs:
 
   deb-build-and-smoke:
     name: Debian ${{ matrix.distribution }} ${{ matrix.architecture }}
-    needs:
-      - release-guard
-      - package-compliance
+    needs: release-guard
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
