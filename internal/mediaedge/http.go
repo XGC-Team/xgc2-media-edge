@@ -2,8 +2,10 @@ package mediaedge
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"errors"
+	"html/template"
 	"io"
 	"net"
 	"net/http"
@@ -12,13 +14,23 @@ import (
 	"time"
 )
 
+//go:embed player/*
+var playerFiles embed.FS
+
+var playerPage = template.Must(template.ParseFS(playerFiles, "player/index.html"))
+
 type httpServer struct {
-	server *Server
-	http   *http.Server
+	server         *Server
+	http           *http.Server
+	allowedOrigins map[string]struct{}
 }
 
 func newHTTPServer(server *Server) *httpServer {
-	httpServer := &httpServer{server: server}
+	allowedOrigins := make(map[string]struct{}, len(server.config.AllowedOrigins))
+	for _, origin := range server.config.AllowedOrigins {
+		allowedOrigins[origin] = struct{}{}
+	}
+	httpServer := &httpServer{server: server, allowedOrigins: allowedOrigins}
 	httpServer.http = &http.Server{
 		Handler:           http.HandlerFunc(httpServer.route),
 		ReadHeaderTimeout: 3 * time.Second,
@@ -48,13 +60,34 @@ func (server *httpServer) close() error {
 }
 
 func (server *httpServer) route(writer http.ResponseWriter, request *http.Request) {
-	if !requestFromLoopback(request) {
-		writeError(writer, http.StatusForbidden, "media edge control is loopback-only")
-		return
-	}
 	path := strings.Trim(strings.TrimSpace(request.URL.Path), "/")
 	parts := strings.Split(path, "/")
+	if snapshotHTTPRoute(parts) {
+		if !requestFromLoopback(request) {
+			writeError(writer, http.StatusForbidden, "media edge snapshot API is loopback-only")
+			return
+		}
+		server.routeSnapshot(writer, request, parts)
+		return
+	}
+	addVary(writer.Header(), "Origin")
+	if request.Method == http.MethodOptions {
+		server.handleCORSPreflight(writer, request, parts)
+		return
+	}
+	if !server.applyCORS(writer, request) {
+		return
+	}
 	switch {
+	case request.Method == http.MethodGet && request.URL.Path == "/":
+		server.servePlayer(writer)
+		return
+	case request.Method == http.MethodGet && request.URL.Path == "/assets/player.css":
+		server.servePlayerAsset(writer, "player/player.css", "text/css; charset=utf-8")
+		return
+	case request.Method == http.MethodGet && request.URL.Path == "/assets/player.js":
+		server.servePlayerAsset(writer, "player/player.js", "text/javascript; charset=utf-8")
+		return
 	case request.Method == http.MethodGet && path == "healthz":
 		writeJSON(writer, http.StatusOK, struct {
 			Sources []SourceStatus `json:"sources"`
@@ -68,25 +101,179 @@ func (server *httpServer) route(writer http.ResponseWriter, request *http.Reques
 		parts[0] == "api" && parts[1] == "v1" && parts[2] == "sessions":
 		server.closeSession(writer, parts[3])
 		return
-	case request.Method == http.MethodPost && len(parts) == 5 &&
-		parts[0] == "api" && parts[1] == "v1" && parts[2] == "sources" && parts[4] == "snapshots":
-		server.captureSnapshot(writer, request, parts[3])
-		return
-	case request.Method == http.MethodGet && len(parts) == 5 &&
-		parts[0] == "api" && parts[1] == "v1" && parts[2] == "snapshots" && parts[4] == "raw":
-		server.readSnapshotRaw(writer, parts[3])
-		return
-	case request.Method == http.MethodGet && len(parts) == 5 &&
-		parts[0] == "api" && parts[1] == "v1" && parts[2] == "snapshots" && parts[4] == "jpeg":
-		server.readSnapshotJPEG(writer, parts[3])
-		return
-	case request.Method == http.MethodDelete && len(parts) == 4 &&
-		parts[0] == "api" && parts[1] == "v1" && parts[2] == "snapshots":
-		server.deleteSnapshot(writer, parts[3])
-		return
 	default:
 		writeError(writer, http.StatusNotFound, "media edge endpoint was not found")
 	}
+}
+
+func (server *httpServer) routeSnapshot(
+	writer http.ResponseWriter,
+	request *http.Request,
+	parts []string,
+) {
+	switch {
+	case request.Method == http.MethodPost && len(parts) == 5 &&
+		parts[0] == "api" && parts[1] == "v1" && parts[2] == "sources" && parts[4] == "snapshots":
+		server.captureSnapshot(writer, request, parts[3])
+	case request.Method == http.MethodGet && len(parts) == 5 &&
+		parts[0] == "api" && parts[1] == "v1" && parts[2] == "snapshots" && parts[4] == "raw":
+		server.readSnapshotRaw(writer, parts[3])
+	case request.Method == http.MethodGet && len(parts) == 5 &&
+		parts[0] == "api" && parts[1] == "v1" && parts[2] == "snapshots" && parts[4] == "jpeg":
+		server.readSnapshotJPEG(writer, parts[3])
+	case request.Method == http.MethodDelete && len(parts) == 4 &&
+		parts[0] == "api" && parts[1] == "v1" && parts[2] == "snapshots":
+		server.deleteSnapshot(writer, parts[3])
+	default:
+		writeError(writer, http.StatusNotFound, "media edge endpoint was not found")
+	}
+}
+
+func snapshotHTTPRoute(parts []string) bool {
+	return (len(parts) == 5 &&
+		parts[0] == "api" && parts[1] == "v1" && parts[2] == "sources" && parts[4] == "snapshots") ||
+		(len(parts) == 5 &&
+			parts[0] == "api" && parts[1] == "v1" && parts[2] == "snapshots" &&
+			(parts[4] == "raw" || parts[4] == "jpeg")) ||
+		(len(parts) == 4 &&
+			parts[0] == "api" && parts[1] == "v1" && parts[2] == "snapshots")
+}
+
+func (server *httpServer) servePlayer(writer http.ResponseWriter) {
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	writer.Header().Set("Cache-Control", "no-store")
+	setPlayerSecurityHeaders(writer.Header())
+	writer.WriteHeader(http.StatusOK)
+	_ = playerPage.ExecuteTemplate(writer, "index.html", struct {
+		SourceID string
+	}{SourceID: server.server.config.Sources[0].ID})
+}
+
+func (server *httpServer) servePlayerAsset(writer http.ResponseWriter, name string, contentType string) {
+	content, err := playerFiles.ReadFile(name)
+	if err != nil {
+		writeError(writer, http.StatusNotFound, "media edge player asset was not found")
+		return
+	}
+	writer.Header().Set("Content-Type", contentType)
+	// Asset paths are intentionally unversioned; never let an Edge upgrade pair
+	// a new session API with a stale cached player script.
+	writer.Header().Set("Cache-Control", "no-store")
+	setPlayerSecurityHeaders(writer.Header())
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(content)
+}
+
+func setPlayerSecurityHeaders(header http.Header) {
+	header.Set("Content-Security-Policy",
+		"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src blob:; "+
+			"base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	header.Set("Referrer-Policy", "no-referrer")
+	header.Set("X-Content-Type-Options", "nosniff")
+}
+
+func (server *httpServer) applyCORS(writer http.ResponseWriter, request *http.Request) bool {
+	origin := strings.TrimSpace(request.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	normalized, allowed := server.allowedOrigin(request, origin)
+	if !allowed {
+		writeError(writer, http.StatusForbidden, "browser origin is not allowed")
+		return false
+	}
+	writer.Header().Set("Access-Control-Allow-Origin", normalized)
+	return true
+}
+
+func (server *httpServer) handleCORSPreflight(
+	writer http.ResponseWriter,
+	request *http.Request,
+	parts []string,
+) {
+	origin := strings.TrimSpace(request.Header.Get("Origin"))
+	if origin == "" {
+		writeError(writer, http.StatusBadRequest, "CORS preflight requires Origin")
+		return
+	}
+	normalized, allowed := server.allowedOrigin(request, origin)
+	if !allowed {
+		writeError(writer, http.StatusForbidden, "browser origin is not allowed")
+		return
+	}
+	method := strings.ToUpper(strings.TrimSpace(request.Header.Get("Access-Control-Request-Method")))
+	if method == "" || !publicRouteAllowsMethod(request.URL.Path, parts, method) {
+		writeError(writer, http.StatusMethodNotAllowed, "CORS method is not allowed for this endpoint")
+		return
+	}
+	requestedHeaders := request.Header.Values("Access-Control-Request-Headers")
+	allowContentType := false
+	for _, value := range requestedHeaders {
+		for _, header := range strings.Split(value, ",") {
+			header = strings.TrimSpace(header)
+			if header == "" {
+				continue
+			}
+			if !strings.EqualFold(header, "Content-Type") {
+				writeError(writer, http.StatusForbidden, "CORS request header is not allowed")
+				return
+			}
+			allowContentType = true
+		}
+	}
+	writer.Header().Set("Access-Control-Allow-Origin", normalized)
+	writer.Header().Set("Access-Control-Allow-Methods", method)
+	if allowContentType {
+		writer.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	}
+	writer.Header().Set("Access-Control-Max-Age", "600")
+	addVary(writer.Header(), "Access-Control-Request-Method")
+	addVary(writer.Header(), "Access-Control-Request-Headers")
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *httpServer) allowedOrigin(request *http.Request, value string) (string, bool) {
+	origin, err := normalizeHTTPOrigin(value)
+	if err != nil {
+		return "", false
+	}
+	if _, allowed := server.allowedOrigins[origin]; allowed {
+		return origin, true
+	}
+	scheme := "http"
+	if request.TLS != nil {
+		scheme = "https"
+	}
+	requestOrigin, err := normalizeHTTPOrigin(scheme + "://" + request.Host)
+	return origin, err == nil && origin == requestOrigin
+}
+
+func publicRouteAllowsMethod(path string, parts []string, method string) bool {
+	switch {
+	case path == "/" || path == "/assets/player.css" || path == "/assets/player.js":
+		return method == http.MethodGet
+	case strings.Trim(strings.TrimSpace(path), "/") == "healthz":
+		return method == http.MethodGet
+	case len(parts) == 5 &&
+		parts[0] == "api" && parts[1] == "v1" && parts[2] == "sources" && parts[4] == "sessions":
+		return method == http.MethodPost
+	case len(parts) == 4 &&
+		parts[0] == "api" && parts[1] == "v1" && parts[2] == "sessions":
+		return method == http.MethodDelete
+	default:
+		return false
+	}
+}
+
+func addVary(header http.Header, value string) {
+	for _, current := range header.Values("Vary") {
+		for _, item := range strings.Split(current, ",") {
+			if strings.EqualFold(strings.TrimSpace(item), value) {
+				return
+			}
+		}
+	}
+	header.Add("Vary", value)
 }
 
 func (server *httpServer) openSession(writer http.ResponseWriter, request *http.Request, sourceID string) {

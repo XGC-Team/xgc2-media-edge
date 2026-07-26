@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -17,26 +18,178 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-func TestNewRejectsExternallyReachableControlAndIngress(t *testing.T) {
-	_, err := New(Config{
+func TestNewAllowsExplicitRemoteControlAndRejectsRemoteIngress(t *testing.T) {
+	if _, err := New(Config{
 		ControlAddress: "0.0.0.0:18083",
 		Sources: []SourceConfig{{
 			ID: "camera", RTPListenAddress: "127.0.0.1:5004", ControlSocket: "/tmp/camera.sock",
-			Width: 1280, Height: 720, FPS: 20,
+			Width: 1280, Height: 720, FPS: 20, FrameID: "camera_optical",
 		}},
-	})
-	if err == nil {
-		t.Fatal("external media control address was accepted")
+	}); err != nil {
+		t.Fatalf("explicit external media control address was rejected: %v", err)
 	}
-	_, err = New(Config{
+	_, err := New(Config{
 		ControlAddress: "127.0.0.1:18083",
 		Sources: []SourceConfig{{
 			ID: "camera", RTPListenAddress: "0.0.0.0:5004", ControlSocket: "/tmp/camera.sock",
-			Width: 1280, Height: 720, FPS: 20,
+			Width: 1280, Height: 720, FPS: 20, FrameID: "camera_optical",
 		}},
 	})
 	if err == nil {
 		t.Fatal("external media RTP ingress was accepted")
+	}
+}
+
+func TestSourceMetadataMayBeLearnedFromDescribe(t *testing.T) {
+	capture := newCaptureControl(t)
+	defer capture.close()
+	rtpAddress := availableLoopbackRTPAddress(t)
+	capture.setRTPDestination(t, rtpAddress)
+	server, err := New(Config{
+		ControlAddress: "127.0.0.1:0",
+		Sources: []SourceConfig{{
+			ID: "camera", RTPListenAddress: rtpAddress, ControlSocket: capture.socket,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create media edge without expected metadata: %v", err)
+	}
+	defer server.Close()
+	if err := server.Start(); err != nil {
+		t.Fatalf("start media edge from describe metadata: %v", err)
+	}
+	status := server.SourceStatuses()[0]
+	if status.Width != 16 || status.Height != 16 || status.FPS != 20 ||
+		status.FrameID != "camera_optical" {
+		t.Fatalf("describe metadata was not applied: %+v", status)
+	}
+	capture.waitFor(t, 1, func(request sourceControlRequest) bool {
+		return request.Operation == "describe"
+	})
+}
+
+func TestSourceExpectedMetadataMustBeCompleteAndMatchDescribe(t *testing.T) {
+	if _, err := New(Config{
+		ControlAddress: "127.0.0.1:0",
+		Sources: []SourceConfig{{
+			ID: "camera", RTPListenAddress: "127.0.0.1:5004", ControlSocket: "/tmp/camera.sock",
+			Width: 16,
+		}},
+	}); err == nil {
+		t.Fatal("partial expected source metadata was accepted")
+	}
+
+	capture := newCaptureControl(t)
+	defer capture.close()
+	rtpAddress := availableLoopbackRTPAddress(t)
+	capture.setRTPDestination(t, rtpAddress)
+	server, err := New(Config{
+		ControlAddress: "127.0.0.1:0",
+		Sources: []SourceConfig{{
+			ID: "camera", RTPListenAddress: rtpAddress, ControlSocket: capture.socket,
+			Width: 32, Height: 16, FPS: 20, FrameID: "camera_optical",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create media edge with expected metadata: %v", err)
+	}
+	defer server.Close()
+	err = server.Start()
+	if err == nil || !strings.Contains(err.Error(), "does not match expected") {
+		t.Fatalf("mismatched describe metadata returned %v", err)
+	}
+}
+
+func TestSourceDescribeRequiresVersionCodecTransportAndCapabilities(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*sourceControlResponse)
+		error  string
+	}{
+		{
+			name: "protocol version",
+			mutate: func(response *sourceControlResponse) {
+				response.ProtocolVersion = 2
+			},
+			error: "protocol version",
+		},
+		{
+			name: "source ID",
+			mutate: func(response *sourceControlResponse) {
+				response.SourceID = "other"
+			},
+			error: "source ID",
+		},
+		{
+			name: "codec",
+			mutate: func(response *sourceControlResponse) {
+				response.Codec = "VP8"
+			},
+			error: "RTP contract",
+		},
+		{
+			name: "payload type",
+			mutate: func(response *sourceControlResponse) {
+				response.RTPPayloadType = 97
+			},
+			error: "RTP contract",
+		},
+		{
+			name: "clock rate",
+			mutate: func(response *sourceControlResponse) {
+				response.RTPClockRate = 48_000
+			},
+			error: "RTP contract",
+		},
+		{
+			name: "RTP host",
+			mutate: func(response *sourceControlResponse) {
+				response.RTPHost = "192.0.2.10"
+			},
+			error: "RTP destination",
+		},
+		{
+			name: "RTP host alias",
+			mutate: func(response *sourceControlResponse) {
+				response.RTPHost = "localhost"
+			},
+			error: "RTP destination",
+		},
+		{
+			name: "RTP port",
+			mutate: func(response *sourceControlResponse) {
+				response.RTPPort = 5005
+			},
+			error: "RTP destination",
+		},
+		{
+			name: "metadata",
+			mutate: func(response *sourceControlResponse) {
+				response.FPS = 0
+			},
+			error: "metadata is invalid",
+		},
+		{
+			name: "capability",
+			mutate: func(response *sourceControlResponse) {
+				response.Capabilities = []string{"set-active", "snapshot"}
+			},
+			error: `capability "request-keyframe"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			description := defaultCaptureDescription()
+			test.mutate(&description)
+			capture := newCaptureControlWithDescription(t, description)
+			defer capture.close()
+			_, err := describeSource(context.Background(), SourceConfig{
+				ID: "camera", RTPListenAddress: "127.0.0.1:5004", ControlSocket: capture.socket,
+			})
+			if err == nil || !strings.Contains(err.Error(), test.error) {
+				t.Fatalf("describe error = %v, want substring %q", err, test.error)
+			}
+		})
 	}
 }
 
@@ -66,7 +219,7 @@ func TestH264CapabilityRequiresLevel51AndKeyframeFeedback(t *testing.T) {
 func TestSourceLifecycleSnapshotAndRTPIngress(t *testing.T) {
 	capture := newCaptureControl(t)
 	defer capture.close()
-	server := newTestServer(t, capture.socket)
+	server := newTestServer(t, capture)
 	defer server.Close()
 
 	snapshot, err := server.CaptureSnapshot(context.Background(), "camera")
@@ -111,7 +264,7 @@ func TestSourceLifecycleSnapshotAndRTPIngress(t *testing.T) {
 func TestOpenAndCloseWebRTCSessionReferenceCountsCapture(t *testing.T) {
 	capture := newCaptureControl(t)
 	defer capture.close()
-	server := newTestServer(t, capture.socket)
+	server := newTestServer(t, capture)
 	defer server.Close()
 
 	browser, err := webrtc.NewPeerConnection(webrtc.Configuration{})
@@ -169,10 +322,61 @@ func TestOpenAndCloseWebRTCSessionReferenceCountsCapture(t *testing.T) {
 	})
 }
 
+func TestMultipleViewersShareOneSourceActivation(t *testing.T) {
+	capture := newCaptureControl(t)
+	defer capture.close()
+	server := newTestServer(t, capture)
+	defer server.Close()
+
+	firstBrowser, first := openConnectedBrowserSession(t, server)
+	defer firstBrowser.Close()
+	secondBrowser, second := openConnectedBrowserSession(t, server)
+	defer secondBrowser.Close()
+	eventually(t, time.Second, func() bool {
+		status := server.SourceStatuses()[0]
+		return status.Active && status.Consumers == 2
+	})
+
+	activations := 0
+	drain := time.NewTimer(150 * time.Millisecond)
+	for {
+		select {
+		case request := <-capture.requests:
+			if request.Operation == "set-active" && request.Active != nil && *request.Active {
+				activations++
+			}
+		case <-drain.C:
+			goto drained
+		}
+	}
+drained:
+	if activations != 1 {
+		t.Fatalf("two viewers caused %d source activations, want one", activations)
+	}
+
+	if !server.CloseSession(first.SessionID) {
+		t.Fatal("first media session was not retained")
+	}
+	eventually(t, time.Second, func() bool {
+		status := server.SourceStatuses()[0]
+		return status.Active && status.Consumers == 1
+	})
+	capture.expectNoMatch(t, 25*time.Millisecond, func(request sourceControlRequest) bool {
+		return request.Operation == "set-active" && request.Active != nil && !*request.Active
+	})
+
+	if !server.CloseSession(second.SessionID) {
+		t.Fatal("second media session was not retained")
+	}
+	capture.waitFor(t, 1, func(request sourceControlRequest) bool {
+		return request.Operation == "set-active" && request.Active != nil && !*request.Active
+	})
+}
+
 func TestRTCPKeyframeFeedbackIsRateLimited(t *testing.T) {
 	capture := newCaptureControl(t)
 	defer capture.close()
-	server := newTestServer(t, capture.socket)
+	server := newTestServer(t, capture)
 	defer server.Close()
 
 	browser, answer := openConnectedBrowserSession(t, server)
@@ -227,7 +431,7 @@ func TestRTCPKeyframeFeedbackIsRateLimited(t *testing.T) {
 
 func TestActiveSourceRecoversAfterCaptureRestart(t *testing.T) {
 	capture := newCaptureControl(t)
-	server := newTestServer(t, capture.socket)
+	server := newTestServer(t, capture)
 	defer server.Close()
 
 	browser, answer := openConnectedBrowserSession(t, server)
@@ -264,7 +468,7 @@ func TestActiveSourceRecoversAfterCaptureRestart(t *testing.T) {
 func TestPendingConsumerPreventsSourceDeactivation(t *testing.T) {
 	capture := newCaptureControl(t)
 	defer capture.close()
-	server := newTestServer(t, capture.socket)
+	server := newTestServer(t, capture)
 	defer server.Close()
 	item := server.source("camera")
 
@@ -305,7 +509,7 @@ func TestDeactivateSerializesWithNewSourceConsumer(t *testing.T) {
 	})
 	defer capture.close()
 	defer releaseDeactivateResponse()
-	server := newTestServer(t, capture.socket)
+	server := newTestServer(t, capture)
 	defer server.Close()
 	item := server.source("camera")
 
@@ -354,7 +558,7 @@ func TestCloseCancelsAndWaitsForPendingSessionActivation(t *testing.T) {
 	})
 	defer capture.close()
 	defer close(releaseActivation)
-	server := newTestServer(t, capture.socket)
+	server := newTestServer(t, capture)
 
 	openResult := make(chan error, 1)
 	go func() {
@@ -492,14 +696,16 @@ func sessionMediaSSRC(t *testing.T, server *Server, sessionID string) uint32 {
 	return uint32(parameters.Encodings[0].SSRC)
 }
 
-func newTestServer(t *testing.T, socket string) *Server {
+func newTestServer(t *testing.T, capture *captureControl) *Server {
 	t.Helper()
+	rtpAddress := availableLoopbackRTPAddress(t)
+	capture.setRTPDestination(t, rtpAddress)
 	server, err := New(Config{
 		ControlAddress:       "127.0.0.1:0",
 		SessionGracePeriod:   5 * time.Millisecond,
 		SessionGatherTimeout: 3 * time.Second,
 		Sources: []SourceConfig{{
-			ID: "camera", RTPListenAddress: "127.0.0.1:0", ControlSocket: socket,
+			ID: "camera", RTPListenAddress: rtpAddress, ControlSocket: capture.socket,
 			Width: 16, Height: 16, FPS: 20, FrameID: "camera_optical",
 		}},
 	})
@@ -519,12 +725,14 @@ func newTestServer(t *testing.T, socket string) *Server {
 }
 
 type captureControl struct {
-	socket      string
-	listener    net.Listener
-	requests    chan sourceControlRequest
-	closed      chan struct{}
-	beforeReply func(sourceControlRequest)
-	once        sync.Once
+	socket        string
+	listener      net.Listener
+	requests      chan sourceControlRequest
+	closed        chan struct{}
+	beforeReply   func(sourceControlRequest)
+	descriptionMu sync.RWMutex
+	description   sourceControlResponse
+	once          sync.Once
 }
 
 func newCaptureControl(t *testing.T) *captureControl {
@@ -539,6 +747,15 @@ func newCaptureControlWithHook(t *testing.T, beforeReply func(sourceControlReque
 	return newCaptureControlAtWithHook(t, socket, beforeReply)
 }
 
+func newCaptureControlWithDescription(
+	t *testing.T,
+	description sourceControlResponse,
+) *captureControl {
+	t.Helper()
+	socket := filepath.Join(t.TempDir(), "camera.sock")
+	return newCaptureControlAtWithHookAndDescription(t, socket, nil, description)
+}
+
 func newCaptureControlAt(t *testing.T, socket string) *captureControl {
 	t.Helper()
 	return newCaptureControlAtWithHook(t, socket, nil)
@@ -550,6 +767,21 @@ func newCaptureControlAtWithHook(
 	beforeReply func(sourceControlRequest),
 ) *captureControl {
 	t.Helper()
+	return newCaptureControlAtWithHookAndDescription(
+		t,
+		socket,
+		beforeReply,
+		defaultCaptureDescription(),
+	)
+}
+
+func newCaptureControlAtWithHookAndDescription(
+	t *testing.T,
+	socket string,
+	beforeReply func(sourceControlRequest),
+	description sourceControlResponse,
+) *captureControl {
+	t.Helper()
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen capture control: %v", err)
@@ -557,6 +789,7 @@ func newCaptureControlAtWithHook(
 	control := &captureControl{
 		socket: socket, listener: listener, requests: make(chan sourceControlRequest, 16),
 		closed: make(chan struct{}), beforeReply: beforeReply,
+		description: description,
 	}
 	go control.accept()
 	return control
@@ -590,6 +823,14 @@ func (control *captureControl) handle(connection net.Conn) {
 	if control.beforeReply != nil {
 		control.beforeReply(request)
 	}
+	if request.Operation == "describe" {
+		control.descriptionMu.RLock()
+		description := control.description
+		control.descriptionMu.RUnlock()
+		encoded, _ := json.Marshal(description)
+		_, _ = connection.Write(append(encoded, '\n'))
+		return
+	}
 	if request.Operation != "snapshot" {
 		_, _ = connection.Write([]byte("{\"ok\":true}\n"))
 		return
@@ -605,6 +846,46 @@ func (control *captureControl) handle(connection net.Conn) {
 	_, _ = connection.Write(append(encoded, '\n'))
 	_, _ = connection.Write(jpeg)
 	_, _ = connection.Write(rgb)
+}
+
+func defaultCaptureDescription() sourceControlResponse {
+	return sourceControlResponse{
+		OK: true, ProtocolVersion: sourceControlProtocolVersion,
+		SourceID: "camera", Codec: sourceCodec,
+		RTPPayloadType: sourceRTPPayloadType, RTPClockRate: h264RTPClockRate,
+		RTPHost: "127.0.0.1", RTPPort: 5004,
+		Width: 16, Height: 16, FPS: 20, FrameID: "camera_optical",
+		Capabilities: append([]string(nil), requiredSourceCapabilities[:]...),
+	}
+}
+
+func availableLoopbackRTPAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("allocate test RTP port: %v", err)
+	}
+	address := listener.LocalAddr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release test RTP port: %v", err)
+	}
+	return address
+}
+
+func (control *captureControl) setRTPDestination(t *testing.T, address string) {
+	t.Helper()
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		t.Fatalf("split test RTP address: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse test RTP port: %v", err)
+	}
+	control.descriptionMu.Lock()
+	control.description.RTPHost = host
+	control.description.RTPPort = port
+	control.descriptionMu.Unlock()
 }
 
 func (control *captureControl) waitFor(t *testing.T, occurrences int, predicate func(sourceControlRequest) bool) {

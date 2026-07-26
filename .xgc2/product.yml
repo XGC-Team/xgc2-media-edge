@@ -1,7 +1,7 @@
 schema: xgc2.product.v1
 id: xgc2-media-edge
 name: XGC2 Media Edge
-version: 0.1.0-1
+version: 0.2.0-1
 kind: toolchain-apt
 summary: Target-resident H264/RTP to WebRTC fanout and immutable camera snapshot
   service for XGC2.
@@ -38,6 +38,6 @@ release:
   workflow: release.yml
   ci_workflow: ci.yml
   apt_versions:
-    focal: 0.1.0-1~focal
-    jammy: 0.1.0-1~jammy
-    noble: 0.1.0-1~noble
+    focal: 0.2.0-1~focal
+    jammy: 0.2.0-1~jammy
+    noble: 0.2.0-1~noble

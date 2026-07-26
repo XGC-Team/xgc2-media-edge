@@ -44,12 +44,12 @@ def main() -> int:
         deb_dir = root / "debs"
         output_dir = root / "manifests"
         deb_dir.mkdir()
-        deb = deb_dir / "xgc2-media-edge_0.1.0-1~focal_amd64.deb"
+        deb = deb_dir / "xgc2-media-edge_0.2.0-1~focal_amd64.deb"
         deb.write_bytes(b"manifest-contract-fixture")
 
         fields = {
             "Package": "xgc2-media-edge",
-            "Version": "0.1.0-1~focal",
+            "Version": "0.2.0-1~focal",
             "Architecture": "amd64",
         }
         module.deb_field = lambda _path, field: fields[field]
@@ -58,7 +58,7 @@ def main() -> int:
                 deb_dir=str(deb_dir),
                 output_dir=str(output_dir),
                 product="xgc2-media-edge",
-                product_version="0.1.0-1",
+                product_version="0.2.0-1",
                 distribution="focal",
                 architecture="amd64",
                 source_sha="a" * 40,
@@ -76,7 +76,7 @@ def main() -> int:
             manifest["schema"] == "xgc2.build-artifact.v1",
             "build manifest schema regressed",
         )
-        require(manifest["version"] == "0.1.0-1", "version field is invalid")
+        require(manifest["version"] == "0.2.0-1", "version field is invalid")
         require(
             isinstance(manifest["debs"], list) and len(manifest["debs"]) == 1,
             "debs must contain exactly the fixture package",

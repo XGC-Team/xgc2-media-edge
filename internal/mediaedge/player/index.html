@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>XGC Media Edge</title>
+    <link rel="stylesheet" href="/assets/player.css">
+    <script src="/assets/player.js" defer></script>
+  </head>
+  <body data-source-id="{{.SourceID}}">
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">XGC MEDIA EDGE</p>
+          <h1>{{.SourceID}}</h1>
+        </div>
+        <span id="state" class="state" data-state="starting">Starting</span>
+      </header>
+      <section class="viewport">
+        <video id="video" autoplay muted playsinline controls></video>
+        <p id="message" role="status">Negotiating a direct WebRTC session…</p>
+      </section>
+      <footer>
+        <button id="reconnect" type="button">Reconnect</button>
+        <span>H.264 · WebRTC · direct to this edge</span>
+      </footer>
+    </main>
+  </body>
+</html>

@@ -1,6 +1,6 @@
 // xgc-media-edge is the target-resident XGC video data plane. It intentionally
-// has no Core URL: Core brokers bounded SDP requests, while ICE/TURN carries
-// live RTP directly between the browser and this process.
+// has no Core or Agent URL: browsers signal directly to its HTTP endpoint, and
+// ICE/TURN carries live RTP directly between each browser and this process.
 package main
 
 import (
@@ -22,14 +22,15 @@ var version = "dev"
 
 func main() {
 	var (
-		controlAddress = flag.String("control-address", "127.0.0.1:18090", "loopback HTTP control address")
+		controlAddress = flag.String("control-address", "127.0.0.1:18090", "HTTP listen address; explicitly bind a target interface for remote browsers")
 		sourceID       = flag.String("source-id", "", "stable media source ID")
 		rtpAddress     = flag.String("rtp-listen-address", "", "loopback H264/RTP ingress address")
 		controlSocket  = flag.String("source-control-socket", "", "absolute Unix socket owned by the capture source")
-		width          = flag.Int("width", 0, "source pixel width")
-		height         = flag.Int("height", 0, "source pixel height")
-		fps            = flag.Float64("fps", 0, "source frame rate")
-		frameID        = flag.String("frame-id", "", "source optical frame ID")
+		width          = flag.Int("width", 0, "optional expected source pixel width; provide all four metadata assertions or none")
+		height         = flag.Int("height", 0, "optional expected source pixel height; provide all four metadata assertions or none")
+		fps            = flag.Float64("fps", 0, "optional expected source frame rate; provide all four metadata assertions or none")
+		frameID        = flag.String("frame-id", "", "optional expected source optical frame ID; provide all four metadata assertions or none")
+		allowedOrigins multiString
 		publicIPs      multiString
 		iceURLs        multiString
 		iceUsername    = flag.String("ice-username", "", "optional shared TURN username")
@@ -38,6 +39,7 @@ func main() {
 		snapshotTTL    = flag.Duration("snapshot-ttl", 2*time.Minute, "immutable snapshot retention")
 		printVersion   = flag.Bool("version", false, "print version and exit")
 	)
+	flag.Var(&allowedOrigins, "allowed-origin", "exact cross-origin WebUI origin, for example https://station.example:8443; repeat as needed")
 	flag.Var(&publicIPs, "public-ip", "public ICE address; repeat for multiple addresses")
 	flag.Var(&iceURLs, "ice-server", "STUN/TURN URL; repeat for multiple URLs")
 	flag.Parse()
@@ -48,6 +50,7 @@ func main() {
 
 	config := mediaedge.Config{
 		ControlAddress: *controlAddress,
+		AllowedOrigins: append([]string(nil), allowedOrigins...),
 		Sources: []mediaedge.SourceConfig{{
 			ID: *sourceID, RTPListenAddress: *rtpAddress, ControlSocket: *controlSocket,
 			Width: *width, Height: *height, FPS: *fps, FrameID: *frameID,
