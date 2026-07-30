@@ -13,6 +13,7 @@ apt:
   - xgc2-media-edge
   depends:
   - ca-certificates
+  - ffmpeg
 usage:
   install: 'sudo apt update
 

@@ -71,8 +71,7 @@ Section: net
 Priority: optional
 Architecture: ${arch}
 Maintainer: XGC2 <apt@example.com>
-Depends: ca-certificates
-Suggests: ffmpeg
+Depends: ca-certificates, ffmpeg
 Description: Target-resident XGC2 H264/WebRTC media data plane
  Receives co-located H264/RTP and source-control traffic, fans encoded media
  out to WebRTC viewers, optionally records stream-copy Matroska segments, and

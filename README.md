@@ -5,15 +5,21 @@ instance accepts one configured, co-located H264/RTP camera source, exposes a
 small direct-browser signaling API, and fans that encoded source out to WebRTC
 viewers without decoding, transcoding, or starting another encoder per viewer.
 
-The product is intentionally independent from ROS, Gazebo, USB camera drivers,
+The product is intentionally independent from ROS, Gazebo, and camera drivers,
 XGC2 Core, and XGC2 Agent. Those systems produce media or coordinate processes;
 this repository owns only the media-edge executable and its protocols. Core and
 Agent are not part of a browser connection.
 
+The Gazebo camera product currently implements this RTP/Unix-socket source
+contract directly. The ROS USB camera driver publishes encoded camera data and
+timing into ROS, but does not itself provide the RTP/control adapter; a physical
+camera deployment must supply a separate conforming adapter before pairing that
+source with Media Edge.
+
 ## Runtime boundary
 
 ```text
-Gazebo or USB capture source
+Conforming H264 capture source
   |-- H264/RTP over loopback UDP
   `-- describe/lifecycle/keyframe/snapshot over a Unix socket
                       |
@@ -93,7 +99,7 @@ The source must answer one newline-delimited JSON object:
 {
   "ok": true,
   "protocolVersion": 1,
-  "sourceId": "usb_cam",
+  "sourceId": "camera",
   "codec": "H264",
   "rtpPayloadType": 96,
   "rtpClockRate": 90000,
@@ -102,7 +108,7 @@ The source must answer one newline-delimited JSON object:
   "width": 1920,
   "height": 1080,
   "fps": 30,
-  "frameId": "usb_cam_optical",
+  "frameId": "camera_optical",
   "capabilities": ["set-active", "request-keyframe", "snapshot"]
 }
 ```
@@ -158,12 +164,12 @@ requires an explicit source peak bitrate for conservative capacity admission:
 --recording-max-bitrate 36000000
 ```
 
-FFmpeg is an optional runtime dependency used solely as a Matroska muxer. When
-recording is enabled, Edge resolves `--recording-ffmpeg` (default `ffmpeg`) at
-startup and fails with a clear error if it is unavailable. The invoked pipeline
-accepts Annex-B H264 and uses `-c:v copy`; it never decodes, re-encodes, changes
-quality, or allocates another NVENC session. Preview-only deployments do not
-need FFmpeg.
+FFmpeg is used solely as a Matroska muxer. The Debian package depends on it so
+recording is available after a clean install. When recording is enabled, Edge
+resolves `--recording-ffmpeg` (default `ffmpeg`) at startup and fails with a
+clear error if it is unavailable. The invoked pipeline accepts Annex-B H264 and
+uses `-c:v copy`; it never decodes, re-encodes, changes quality, or allocates
+another NVENC session. A preview-only source build does not execute FFmpeg.
 
 One receive loop performs RTP continuity rewriting once, then sends that same
 encoded stream to both branches:
@@ -197,7 +203,7 @@ Start requests require an integer duration:
 curl --fail-with-body \
   -H 'Content-Type: application/json' \
   -d '{"durationSeconds":3600}' \
-  http://127.0.0.1:18090/api/v1/sources/usb_cam/recordings
+  http://127.0.0.1:18090/api/v1/sources/camera/recordings
 ```
 
 Before creating output, Edge checks filesystem space using:
@@ -269,15 +275,15 @@ development; Debian packages are the production artifact.
 
 ## Run
 
-Example for a co-located source:
+Example for a co-located source that already implements the contract above:
 
 ```bash
 ./.ci/bin/xgc-media-edge \
   --control-address 0.0.0.0:18090 \
   --allowed-origin http://192.168.1.20:3000 \
-  --source-id usb_cam \
+  --source-id camera \
   --rtp-listen-address 127.0.0.1:5004 \
-  --source-control-socket /tmp/xgc2/media/usb_cam.sock \
+  --source-control-socket /tmp/xgc2/media/camera.sock \
   --recording-root /var/lib/xgc2/media-recordings \
   --recording-max-bitrate 13500000
 ```

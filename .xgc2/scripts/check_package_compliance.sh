@@ -60,6 +60,8 @@ fi
 grep -q '^id: xgc2-media-edge$' .xgc2/product.yml
 grep -q '^  distribution: focal,jammy,noble$' .xgc2/product.yml
 grep -q '^  - /usr/bin/xgc-media-edge$' .xgc2/product.yml
+grep -q '^  - ffmpeg$' .xgc2/product.yml
+grep -q '^Depends: ca-certificates, ffmpeg$' .xgc2/scripts/build_deb.sh
 grep -q '^BSD 3-Clause License$' LICENSE
 
 echo "xgc2-media-edge package compliance checks passed."
