@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -29,6 +30,14 @@ const (
 	// second video buffer in the media edge.
 	defaultSnapshotTTL = 15 * time.Second
 	maximumSnapshots   = 2
+
+	defaultRecordingQueuePackets   = 8192
+	defaultRecordingSegment        = 5 * time.Minute
+	defaultRecordingMaxDuration    = 24 * time.Hour
+	defaultRecordingFinalize       = 15 * time.Second
+	defaultRecordingKeyframeWait   = 8 * time.Second
+	defaultRecordingMinimumFree    = uint64(1 << 30)
+	defaultRecordingCapacityFactor = 1.20
 )
 
 // Config is the complete, target-local configuration of one media edge. The
@@ -44,6 +53,24 @@ type Config struct {
 	SessionGracePeriod   time.Duration
 	SnapshotTTL          time.Duration
 	SessionGatherTimeout time.Duration
+	Recording            RecordingConfig
+}
+
+// RecordingConfig enables optional, local H264 stream-copy recording. An empty
+// Root disables the feature completely. When enabled, MaxBitrateBitsPerSecond
+// is mandatory because capacity admission must use the source's configured
+// peak bitrate rather than an optimistic observed average.
+type RecordingConfig struct {
+	Root                    string
+	FFmpegPath              string
+	MaxBitrateBitsPerSecond uint64
+	QueuePackets            int
+	SegmentDuration         time.Duration
+	MaxDuration             time.Duration
+	FinalizeTimeout         time.Duration
+	KeyframeTimeout         time.Duration
+	MinimumFreeBytes        uint64
+	CapacitySafetyFactor    float64
 }
 
 // SourceConfig describes one locally produced, H264/RTP source. The capture
@@ -78,6 +105,11 @@ func (config Config) normalized() (Config, error) {
 	if config.SessionGatherTimeout <= 0 {
 		config.SessionGatherTimeout = 12 * time.Second
 	}
+	recording, err := config.Recording.normalized()
+	if err != nil {
+		return Config{}, err
+	}
+	config.Recording = recording
 	seen := make(map[string]struct{}, len(config.Sources))
 	for index := range config.Sources {
 		source, err := config.Sources[index].normalized()
@@ -109,6 +141,82 @@ func (config Config) normalized() (Config, error) {
 		origins = append(origins, origin)
 	}
 	config.AllowedOrigins = origins
+	return config, nil
+}
+
+func (config RecordingConfig) enabled() bool {
+	return strings.TrimSpace(config.Root) != ""
+}
+
+func (config RecordingConfig) normalized() (RecordingConfig, error) {
+	config.Root = strings.TrimSpace(config.Root)
+	config.FFmpegPath = strings.TrimSpace(config.FFmpegPath)
+	if config.Root == "" {
+		if config.FFmpegPath != "" ||
+			config.MaxBitrateBitsPerSecond != 0 ||
+			config.QueuePackets != 0 ||
+			config.SegmentDuration != 0 ||
+			config.MaxDuration != 0 ||
+			config.FinalizeTimeout != 0 ||
+			config.KeyframeTimeout != 0 ||
+			config.MinimumFreeBytes != 0 ||
+			config.CapacitySafetyFactor != 0 {
+			return RecordingConfig{}, errors.New("media recording root is required when recording options are configured")
+		}
+		return RecordingConfig{}, nil
+	}
+	if !filepath.IsAbs(config.Root) {
+		return RecordingConfig{}, errors.New("media recording root must be an absolute path")
+	}
+	config.Root = filepath.Clean(config.Root)
+	if config.FFmpegPath == "" {
+		config.FFmpegPath = "ffmpeg"
+	}
+	if config.MaxBitrateBitsPerSecond == 0 {
+		return RecordingConfig{}, errors.New("media recording peak bitrate must be configured")
+	}
+	if config.MaxBitrateBitsPerSecond > 10_000_000_000 {
+		return RecordingConfig{}, errors.New("media recording peak bitrate must not exceed 10 Gbit/s")
+	}
+	if config.QueuePackets == 0 {
+		config.QueuePackets = defaultRecordingQueuePackets
+	}
+	if config.QueuePackets < 64 || config.QueuePackets > 131_072 {
+		return RecordingConfig{}, errors.New("media recording queue must contain between 64 and 131072 RTP packets")
+	}
+	if config.SegmentDuration == 0 {
+		config.SegmentDuration = defaultRecordingSegment
+	}
+	if config.SegmentDuration < time.Second || config.SegmentDuration > time.Hour {
+		return RecordingConfig{}, errors.New("media recording segment duration must be between 1 second and 1 hour")
+	}
+	if config.MaxDuration == 0 {
+		config.MaxDuration = defaultRecordingMaxDuration
+	}
+	if config.MaxDuration < time.Second || config.MaxDuration > 7*24*time.Hour {
+		return RecordingConfig{}, errors.New("media recording maximum duration must be between 1 second and 7 days")
+	}
+	if config.FinalizeTimeout == 0 {
+		config.FinalizeTimeout = defaultRecordingFinalize
+	}
+	if config.FinalizeTimeout < time.Second || config.FinalizeTimeout > time.Minute {
+		return RecordingConfig{}, errors.New("media recording finalize timeout must be between 1 second and 1 minute")
+	}
+	if config.KeyframeTimeout == 0 {
+		config.KeyframeTimeout = defaultRecordingKeyframeWait
+	}
+	if config.KeyframeTimeout < time.Second || config.KeyframeTimeout > time.Minute {
+		return RecordingConfig{}, errors.New("media recording keyframe timeout must be between 1 second and 1 minute")
+	}
+	if config.MinimumFreeBytes == 0 {
+		config.MinimumFreeBytes = defaultRecordingMinimumFree
+	}
+	if config.CapacitySafetyFactor == 0 {
+		config.CapacitySafetyFactor = defaultRecordingCapacityFactor
+	}
+	if config.CapacitySafetyFactor < 1 || config.CapacitySafetyFactor > 10 {
+		return RecordingConfig{}, errors.New("media recording capacity safety factor must be between 1 and 10")
+	}
 	return config, nil
 }
 

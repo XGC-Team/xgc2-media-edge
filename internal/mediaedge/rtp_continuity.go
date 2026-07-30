@@ -38,9 +38,13 @@ func newRTPContinuityRewriter(fps float64) rtpContinuityRewriter {
 	return rtpContinuityRewriter{nominalTimestampStep: step}
 }
 
-func (rewriter *rtpContinuityRewriter) rewrite(packet *rtp.Packet) {
+// rewrite returns true when an encoder restart or excessive timestamp jump was
+// hidden from WebRTC by opening a new continuity segment. Recorders use that
+// signal as a hard container discontinuity and wait for a fresh IDR.
+func (rewriter *rtpContinuityRewriter) rewrite(packet *rtp.Packet) bool {
 	inputTimestamp := packet.Timestamp
 	inputSequence := packet.SequenceNumber
+	restarted := false
 
 	if !rewriter.initialized {
 		rewriter.initialized = true
@@ -50,6 +54,7 @@ func (rewriter *rtpContinuityRewriter) rewrite(packet *rtp.Packet) {
 		// negative timestamp delta denotes an encoder clock restart.
 		timestampDelta := int64(int32(inputTimestamp - rewriter.lastInputTimestamp))
 		if timestampDelta < 0 || timestampDelta > maximumContinuousRTPTimestampGap {
+			restarted = true
 			outputTimestamp := rewriter.lastOutputTimestamp + rewriter.nominalTimestampStep
 			outputSequence := rewriter.lastOutputSequence + 1
 			rewriter.timestampOffset = outputTimestamp - inputTimestamp
@@ -62,4 +67,5 @@ func (rewriter *rtpContinuityRewriter) rewrite(packet *rtp.Packet) {
 	rewriter.lastInputTimestamp = inputTimestamp
 	rewriter.lastOutputTimestamp = packet.Timestamp
 	rewriter.lastOutputSequence = packet.SequenceNumber
+	return restarted
 }

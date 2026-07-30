@@ -62,6 +62,14 @@ func (server *httpServer) close() error {
 func (server *httpServer) route(writer http.ResponseWriter, request *http.Request) {
 	path := strings.Trim(strings.TrimSpace(request.URL.Path), "/")
 	parts := strings.Split(path, "/")
+	if recordingHTTPRoute(parts) {
+		if !requestFromLoopback(request) {
+			writeError(writer, http.StatusForbidden, "media edge recording API is loopback-only")
+			return
+		}
+		server.routeRecording(writer, request, parts)
+		return
+	}
 	if snapshotHTTPRoute(parts) {
 		if !requestFromLoopback(request) {
 			writeError(writer, http.StatusForbidden, "media edge snapshot API is loopback-only")
@@ -104,6 +112,59 @@ func (server *httpServer) route(writer http.ResponseWriter, request *http.Reques
 	default:
 		writeError(writer, http.StatusNotFound, "media edge endpoint was not found")
 	}
+}
+
+func (server *httpServer) routeRecording(
+	writer http.ResponseWriter,
+	request *http.Request,
+	parts []string,
+) {
+	switch {
+	case request.Method == http.MethodPost && len(parts) == 5 &&
+		parts[0] == "api" && parts[1] == "v1" && parts[2] == "sources" && parts[4] == "recordings":
+		var input StartRecordingRequest
+		if !decodeJSON(writer, request, &input) {
+			return
+		}
+		recording, err := server.server.StartRecording(request.Context(), parts[3], input)
+		if err != nil {
+			writeError(writer, recordingHTTPStatus(err), err.Error())
+			return
+		}
+		writeJSON(writer, http.StatusCreated, recording)
+	case request.Method == http.MethodGet && len(parts) == 3 &&
+		parts[0] == "api" && parts[1] == "v1" && parts[2] == "recordings":
+		writeJSON(writer, http.StatusOK, struct {
+			Recordings []RecordingManifest `json:"recordings"`
+		}{Recordings: server.server.Recordings()})
+	case request.Method == http.MethodGet && len(parts) == 4 &&
+		parts[0] == "api" && parts[1] == "v1" && parts[2] == "recordings":
+		recording, found := server.server.Recording(parts[3])
+		if !found {
+			writeError(writer, http.StatusNotFound, ErrRecordingNotFound.Error())
+			return
+		}
+		writeJSON(writer, http.StatusOK, recording)
+	case request.Method == http.MethodDelete && len(parts) == 4 &&
+		parts[0] == "api" && parts[1] == "v1" && parts[2] == "recordings":
+		recording, err := server.server.StopRecording(request.Context(), parts[3])
+		if err != nil {
+			writeError(writer, recordingHTTPStatus(err), err.Error())
+			return
+		}
+		writeJSON(writer, http.StatusOK, recording)
+	default:
+		writeError(writer, http.StatusNotFound, "media edge endpoint was not found")
+	}
+}
+
+func recordingHTTPRoute(parts []string) bool {
+	return (len(parts) == 5 &&
+		parts[0] == "api" && parts[1] == "v1" && parts[2] == "sources" && parts[4] == "recordings") ||
+		(len(parts) == 3 &&
+			parts[0] == "api" && parts[1] == "v1" && parts[2] == "recordings") ||
+		(len(parts) == 4 &&
+			parts[0] == "api" && parts[1] == "v1" && parts[2] == "recordings")
 }
 
 func (server *httpServer) routeSnapshot(

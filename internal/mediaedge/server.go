@@ -54,11 +54,15 @@ type Server struct {
 	config Config
 	api    *webrtc.API
 
-	mu         sync.RWMutex
-	sources    map[string]*source
-	sessions   map[string]*session
-	closing    bool
-	operations sync.WaitGroup
+	mu                    sync.RWMutex
+	sources               map[string]*source
+	sessions              map[string]*session
+	recordings            map[string]*recording
+	recordingHistory      map[string]RecordingManifest
+	recordingMuxerFactory recordingMuxerFactory
+	recordingReady        bool
+	closing               bool
+	operations            sync.WaitGroup
 
 	lifecycleContext context.Context
 	cancelLifecycle  context.CancelFunc
@@ -74,18 +78,20 @@ type source struct {
 	config SourceConfig
 	track  *webrtc.TrackLocalStaticRTP
 
-	lifecycleMu     sync.Mutex
-	mu              sync.Mutex
-	rtp             *net.UDPConn
-	sessions        map[string]struct{}
-	pending         int
-	active          bool
-	deactivateTimer *time.Timer
-	deactivateEpoch uint64
-	lastPacketAt    time.Time
-	packetCount     uint64
-	snapshots       map[string]Snapshot
-	snapshotOrder   []string
+	lifecycleMu          sync.Mutex
+	recordingLifecycleMu sync.Mutex
+	mu                   sync.Mutex
+	rtp                  *net.UDPConn
+	sessions             map[string]struct{}
+	recording            *recording
+	pending              int
+	active               bool
+	deactivateTimer      *time.Timer
+	deactivateEpoch      uint64
+	lastPacketAt         time.Time
+	packetCount          uint64
+	snapshots            map[string]Snapshot
+	snapshotOrder        []string
 
 	activeSince             time.Time
 	lastKeyframeRequestAt   time.Time
@@ -130,6 +136,8 @@ type SourceStatus struct {
 	ID              string    `json:"id"`
 	Active          bool      `json:"active"`
 	Consumers       int       `json:"consumers"`
+	Viewers         int       `json:"viewers"`
+	RecordingID     string    `json:"recordingId,omitempty"`
 	LastPacketAt    time.Time `json:"lastPacketAt,omitempty"`
 	PacketsReceived uint64    `json:"packetsReceived"`
 	Width           int       `json:"width"`
@@ -172,6 +180,8 @@ func New(config Config) (*Server, error) {
 		),
 		sources:          make(map[string]*source, len(normalized.Sources)),
 		sessions:         make(map[string]*session),
+		recordings:       make(map[string]*recording),
+		recordingHistory: make(map[string]RecordingManifest),
 		lifecycleContext: lifecycleContext,
 		cancelLifecycle:  cancelLifecycle,
 		closed:           make(chan struct{}),
@@ -199,6 +209,9 @@ func New(config Config) (*Server, error) {
 // listener. Source describe metadata is authoritative; optional configured
 // metadata acts only as a strict deployment assertion.
 func (server *Server) Start() error {
+	if err := server.prepareRecording(); err != nil {
+		return err
+	}
 	sourceIDs := make([]string, 0, len(server.sources))
 	for sourceID := range server.sources {
 		sourceIDs = append(sourceIDs, sourceID)
@@ -453,7 +466,7 @@ func (server *Server) closeSession(item *session) {
 func (source *source) removeSession(sessionID string) {
 	source.mu.Lock()
 	delete(source.sessions, sessionID)
-	empty := len(source.sessions) == 0 && source.pending == 0
+	empty := !source.hasConsumersLocked()
 	source.mu.Unlock()
 	if empty {
 		source.scheduleDeactivate()
@@ -505,7 +518,7 @@ func (source *source) releasePending(sessionID string) {
 	if sessionID != "" {
 		source.sessions[sessionID] = struct{}{}
 	}
-	unused := source.pending == 0 && len(source.sessions) == 0 && source.active
+	unused := !source.hasConsumersLocked() && source.active
 	source.mu.Unlock()
 	if unused {
 		source.scheduleDeactivate()
@@ -518,6 +531,18 @@ func (source *source) cancelDeactivateTimerLocked() {
 		source.deactivateTimer.Stop()
 		source.deactivateTimer = nil
 	}
+}
+
+func (source *source) hasConsumersLocked() bool {
+	return source.pending != 0 || len(source.sessions) != 0 || source.recording != nil
+}
+
+func (source *source) consumerCountLocked() int {
+	count := len(source.sessions)
+	if source.recording != nil {
+		count++
+	}
+	return count
 }
 
 func (source *source) requestKeyframe(ctx context.Context) error {
@@ -599,7 +624,7 @@ func (source *source) recoverIfStalled(now time.Time) {
 	if lastActivity.Before(source.activeSince) {
 		lastActivity = source.activeSince
 	}
-	if !source.active || len(source.sessions) == 0 || lastActivity.IsZero() ||
+	if !source.active || source.consumerCountLocked() == 0 || lastActivity.IsZero() ||
 		now.Sub(lastActivity) < source.stallTimeout ||
 		(!source.lastRecoveryAttemptAt.IsZero() &&
 			now.Sub(source.lastRecoveryAttemptAt) < source.recoveryMinimumInterval) {
@@ -628,7 +653,7 @@ func (source *source) scheduleDeactivate() {
 		return
 	}
 	source.mu.Lock()
-	if !source.active || len(source.sessions) != 0 || source.pending != 0 {
+	if !source.active || source.hasConsumersLocked() {
 		source.mu.Unlock()
 		return
 	}
@@ -654,7 +679,7 @@ func (source *source) deactivateIfUnused(epoch uint64) {
 		return
 	}
 	source.deactivateTimer = nil
-	if !source.active || len(source.sessions) != 0 || source.pending != 0 {
+	if !source.active || source.hasConsumersLocked() {
 		source.mu.Unlock()
 		return
 	}
@@ -686,12 +711,19 @@ func (source *source) receiveRTP(connection *net.UDPConn) {
 		if packet.PayloadType != 96 || len(packet.Payload) == 0 {
 			continue
 		}
-		source.continuity.rewrite(&packet)
+		restarted := source.continuity.rewrite(&packet)
 		now := time.Now()
 		source.mu.Lock()
 		source.packetCount++
 		source.lastPacketAt = now
+		recorder := source.recording
 		source.mu.Unlock()
+		if recorder != nil {
+			if restarted {
+				recorder.markDiscontinuity()
+			}
+			recorder.enqueue(&packet, now)
+		}
 		if err := source.track.WriteRTP(&packet); err != nil && !errors.Is(err, io.ErrClosedPipe) {
 			continue
 		}
@@ -738,18 +770,35 @@ func (server *Server) CaptureSnapshot(ctx context.Context, sourceID string) (Sna
 	}
 	snapshot := Snapshot{
 		ID: id, SourceID: source.config.ID, FrameID: response.FrameID, TimestampNanoseconds: response.TimestampNanoseconds,
-		Width: response.Width, Height: response.Height, PixelFormat: response.PixelFormat,
+		TimestampClockDomain: strings.ToLower(strings.TrimSpace(response.TimestampClockDomain)),
+		Width:                response.Width, Height: response.Height, PixelFormat: response.PixelFormat,
 		JPEG: jpeg, RGB: rgb, CameraMatrix: append([]float64(nil), response.CameraMatrix...),
-		Distortion: append([]float64(nil), response.Distortion...), ExpiresAt: time.Now().Add(server.config.SnapshotTTL),
+		Distortion: append([]float64(nil), response.Distortion...),
+		RenderPose: cloneSnapshotRenderPose(response.RenderPose), PoseFrameID: response.PoseFrameID,
+		ExpiresAt: time.Now().Add(server.config.SnapshotTTL),
 	}
 	if snapshot.FrameID == "" {
 		snapshot.FrameID = source.config.FrameID
 	}
-	if snapshot.TimestampNanoseconds <= 0 {
-		// A non-Gazebo source may have no source timestamp. Keep a monotonic
-		// metadata value for that exceptional case without pretending this is a
-		// Gazebo/ROS timestamp.
+	switch snapshot.TimestampClockDomain {
+	case "simulation", "system_realtime", "monotonic", "device", "unknown":
+	case "":
+		snapshot.TimestampClockDomain = "unknown"
+	default:
+		return Snapshot{}, fmt.Errorf(
+			"capture source snapshot returned invalid timestamp clock domain %q",
+			response.TimestampClockDomain,
+		)
+	}
+	if snapshot.TimestampNanoseconds < 0 {
+		return Snapshot{}, errors.New("capture source snapshot returned a negative source timestamp")
+	}
+	if snapshot.TimestampClockDomain == "unknown" && snapshot.TimestampNanoseconds == 0 {
+		// Older non-Gazebo sources may have neither timestamp nor clock-domain
+		// metadata. Preserve an explicit domain for the local fallback instead
+		// of silently presenting wall time as source time.
 		snapshot.TimestampNanoseconds = time.Now().UnixNano()
+		snapshot.TimestampClockDomain = "system_realtime"
 	}
 	source.storeSnapshot(snapshot)
 	return snapshot, nil
@@ -834,8 +883,13 @@ func (server *Server) SourceStatuses() []SourceStatus {
 	statuses := make([]SourceStatus, 0, len(sources))
 	for _, source := range sources {
 		source.mu.Lock()
+		recordingID := ""
+		if source.recording != nil {
+			recordingID = source.recording.manifest.RecordingID
+		}
 		statuses = append(statuses, SourceStatus{ID: source.config.ID, Active: source.active,
-			Consumers: len(source.sessions), LastPacketAt: source.lastPacketAt.UTC(), PacketsReceived: source.packetCount,
+			Consumers: source.consumerCountLocked(), Viewers: len(source.sessions), RecordingID: recordingID,
+			LastPacketAt: source.lastPacketAt.UTC(), PacketsReceived: source.packetCount,
 			Width: source.config.Width, Height: source.config.Height, FPS: source.config.FPS, FrameID: source.config.FrameID})
 		source.mu.Unlock()
 	}
@@ -925,6 +979,23 @@ func (server *Server) Close() error {
 		server.mu.RUnlock()
 		for _, item := range sessions {
 			server.closeSession(item)
+		}
+		for _, source := range sources {
+			source.mu.Lock()
+			item := source.recording
+			source.mu.Unlock()
+			if item == nil {
+				continue
+			}
+			item.requestStop("")
+			ctx, cancel := context.WithTimeout(
+				context.Background(),
+				source.server.config.Recording.FinalizeTimeout+2*time.Second,
+			)
+			if err := item.wait(ctx); err != nil && closeErr == nil {
+				closeErr = fmt.Errorf("finalize media recording %q: %w", item.manifest.RecordingID, err)
+			}
+			cancel()
 		}
 		for _, source := range sources {
 			source.lifecycleMu.Lock()

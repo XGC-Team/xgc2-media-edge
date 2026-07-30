@@ -100,6 +100,17 @@ func TestSourceExpectedMetadataMustBeCompleteAndMatchDescribe(t *testing.T) {
 	}
 }
 
+func TestNominalFrameRateAssertionToleratesRepresentationNoise(t *testing.T) {
+	if !nominalFrameRatesMatch(30.000000300000004, 30) {
+		t.Fatal("equivalent 30 Hz values separated only by float representation were rejected")
+	}
+	for _, actual := range []float64{29.99, 30.01, 60} {
+		if nominalFrameRatesMatch(actual, 30) {
+			t.Fatalf("genuinely different frame rate %g was accepted as 30 Hz", actual)
+		}
+	}
+}
+
 func TestSourceDescribeRequiresVersionCodecTransportAndCapabilities(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -725,14 +736,16 @@ func newTestServer(t *testing.T, capture *captureControl) *Server {
 }
 
 type captureControl struct {
-	socket        string
-	listener      net.Listener
-	requests      chan sourceControlRequest
-	closed        chan struct{}
-	beforeReply   func(sourceControlRequest)
-	descriptionMu sync.RWMutex
-	description   sourceControlResponse
-	once          sync.Once
+	socket              string
+	listener            net.Listener
+	requests            chan sourceControlRequest
+	closed              chan struct{}
+	beforeReply         func(sourceControlRequest)
+	descriptionMu       sync.RWMutex
+	description         sourceControlResponse
+	snapshotRenderPose  *SnapshotRenderPose
+	snapshotPoseFrameID string
+	once                sync.Once
 }
 
 func newCaptureControl(t *testing.T) *captureControl {
@@ -837,10 +850,16 @@ func (control *captureControl) handle(connection net.Conn) {
 	}
 	rgb := make([]byte, 16*16*3)
 	jpeg := []byte("\xff\xd8xgc\xff\xd9")
+	control.descriptionMu.RLock()
+	renderPose := cloneSnapshotRenderPose(control.snapshotRenderPose)
+	poseFrameID := control.snapshotPoseFrameID
+	control.descriptionMu.RUnlock()
 	response := sourceControlResponse{
 		OK: true, SnapshotID: request.SnapshotID, FrameID: "camera_optical", TimestampNanoseconds: 1700000000000000000,
-		Width: 16, Height: 16, PixelFormat: "rgb8", JPEGBytes: len(jpeg), RGBBytes: len(rgb),
+		TimestampClockDomain: "simulation",
+		Width:                16, Height: 16, PixelFormat: "rgb8", JPEGBytes: len(jpeg), RGBBytes: len(rgb),
 		CameraMatrix: []float64{5, 0, 8, 0, 5, 8, 0, 0, 1}, Distortion: []float64{0, 0, 0, 0, 0},
+		RenderPose: renderPose, PoseFrameID: poseFrameID,
 	}
 	encoded, _ := json.Marshal(response)
 	_, _ = connection.Write(append(encoded, '\n'))

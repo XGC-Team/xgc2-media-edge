@@ -19,8 +19,8 @@ Gazebo or USB capture source
                       |
                       v
                xgc-media-edge
-                 |           |
-                 |           `-- WebRTC/SRTP to browser viewers
+                 |           |-- WebRTC/SRTP to browser viewers
+                 |           `-- optional H264 stream-copy recording
                  `-- HTTP signaling directly from the browser
 ```
 
@@ -49,8 +49,9 @@ The remotely reachable HTTP surface is deliberately small:
 | `DELETE` | `/api/v1/sessions/{sessionId}` | Deterministic session teardown |
 
 HTTP snapshot creation and retrieval retain their existing paths but reject
-every non-loopback client. Live video is never served as HTTP pixels: there is
-no MJPEG, HLS, JPEG polling, discovery, SSE, or WebSocket API.
+every non-loopback client. Recording control is also loopback-only and is
+documented below. Live video is never served as HTTP pixels: there is no MJPEG,
+HLS, JPEG polling, discovery, SSE, or WebSocket API.
 
 The embedded page receives only the configured source ID from the server. Its
 plain browser code creates a recv-only `RTCPeerConnection`, waits for local ICE
@@ -124,7 +125,133 @@ The same newline-delimited JSON Unix protocol supports:
 
 A snapshot is one immutable transaction containing display JPEG bytes, exact
 RGB8 bytes, camera intrinsics, distortion coefficients, frame ID, and a
-source-clock timestamp. Live pixels never use HTTP polling.
+source-clock timestamp. New sources also identify that timestamp's clock
+domain using the `xgc_camera_msgs/StreamInfo` vocabulary. A source may return
+the fields below; Edge passes them through without requiring them from older
+protocol-v1 sources:
+
+```json
+{
+  "timestampClockDomain": "simulation",
+  "renderPose": {
+    "position": {"x": 1.0, "y": 2.0, "z": 3.0},
+    "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
+  },
+  "poseFrameId": "world"
+}
+```
+
+`timestampClockDomain` is one of `simulation`, `system_realtime`, `monotonic`,
+`device`, or `unknown`. If an older source omits both domain and timestamp,
+Edge explicitly labels its local fallback `system_realtime`. `renderPose` is
+the camera pose for the exact snapshot render, expressed in `poseFrameId`; it
+is intended for evidence packages and calibration. Live pixels never use HTTP
+polling.
+
+## Optional H264 recording
+
+Recording is disabled unless `--recording-root` is set. Enabling it also
+requires an explicit source peak bitrate for conservative capacity admission:
+
+```bash
+--recording-root /var/lib/xgc2/media-recordings \
+--recording-max-bitrate 36000000
+```
+
+FFmpeg is an optional runtime dependency used solely as a Matroska muxer. When
+recording is enabled, Edge resolves `--recording-ffmpeg` (default `ffmpeg`) at
+startup and fails with a clear error if it is unavailable. The invoked pipeline
+accepts Annex-B H264 and uses `-c:v copy`; it never decodes, re-encodes, changes
+quality, or allocates another NVENC session. Preview-only deployments do not
+need FFmpeg.
+
+One receive loop performs RTP continuity rewriting once, then sends that same
+encoded stream to both branches:
+
+- Pion's shared WebRTC RTP track;
+- a non-blocking, bounded recorder queue and independent writer.
+
+A slow disk or muxer therefore cannot block preview. Queue overflow, RTP packet
+loss, malformed H264 packetization, and source clock restarts are recorded as
+discontinuities. The writer closes the preceding valid segment, discards
+dependent frames, requests a keyframe, and resumes only from a complete
+SPS/PPS+IDR access unit. Segment duration is a target: a cut occurs at the first
+IDR at or after the configured duration, never between dependent frames. Only
+one recording may be active per source; any number of viewers may join or leave
+without changing it. A recording is itself a source consumer, so zero viewers
+does not stop capture.
+
+Recording control follows the snapshot security boundary and rejects every
+non-loopback client:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/sources/{sourceId}/recordings` | Start a bounded recording |
+| `GET` | `/api/v1/recordings` | List active and finalized recordings |
+| `GET` | `/api/v1/recordings/{recordingId}` | Read current/final status |
+| `DELETE` | `/api/v1/recordings/{recordingId}` | Stop and finalize |
+
+Start requests require an integer duration:
+
+```bash
+curl --fail-with-body \
+  -H 'Content-Type: application/json' \
+  -d '{"durationSeconds":3600}' \
+  http://127.0.0.1:18090/api/v1/sources/usb_cam/recordings
+```
+
+Before creating output, Edge checks filesystem space using:
+
+```text
+peak bitrate / 8 * requested duration * capacity safety factor
+  + minimum retained free bytes
+```
+
+The defaults are a 1.20 safety factor and 1 GiB retained free space. Admission
+uses the configured peak bitrate, not an observed average. The maximum accepted
+duration defaults to 24 hours.
+
+Each recording has a generated ID and stays beneath the canonical configured
+root:
+
+```text
+RECORDING_ROOT/
+  RECORDING_ID/
+    manifest.json
+    segments/
+      segment-000001.mkv
+      segment-000001.frames.jsonl
+      segment-000002.mkv
+      segment-000002.frames.jsonl
+```
+
+FFmpeg writes `.mkv.part`; Edge fsyncs and atomically renames it only after a
+successful finalize. The per-segment JSONL frame index follows the same rule
+and records the rewritten RTP timestamp, RTP sequence range, keyframe flag,
+Annex-B byte count, segment-relative 90 kHz PTS, and Edge ingress UTC for every
+complete access unit. Edge ingress UTC is a receive-time diagnostic, not a
+claim about camera exposure or Gazebo simulation time. Offline synchronization
+must correlate the RTP timeline to a separately defined source clock. Matroska
+playback uses the configured nominal frame rate; the JSONL RTP timeline is
+authoritative when source frames were skipped or an exact external time join is
+required.
+
+`manifest.json` is atomically replaced at segment boundaries and final stop. It
+contains source and codec identity, requested and actual times, queue high-water
+and overflow counts, RTP loss/discontinuities, access-unit/keyframe totals,
+bytes, finalized segments, and any failure reason. A restart preserves
+previously finalized segments and marks a nonterminal manifest failed; orphan
+`.part` files are never listed as finalized media.
+
+Relevant tuning flags are:
+
+- `--recording-queue-packets` (default `8192`);
+- `--recording-segment-duration` (default `5m`);
+- `--recording-max-duration` (default `24h`);
+- `--recording-keyframe-timeout` (default `8s`);
+- `--recording-finalize-timeout` (default `15s`);
+- `--recording-minimum-free-bytes` (default `1073741824`);
+- `--recording-capacity-safety-factor` (default `1.20`).
 
 ## Build and test from source
 
@@ -150,7 +277,9 @@ Example for a co-located source:
   --allowed-origin http://192.168.1.20:3000 \
   --source-id usb_cam \
   --rtp-listen-address 127.0.0.1:5004 \
-  --source-control-socket /tmp/xgc2/media/usb_cam.sock
+  --source-control-socket /tmp/xgc2/media/usb_cam.sock \
+  --recording-root /var/lib/xgc2/media-recordings \
+  --recording-max-bitrate 13500000
 ```
 
 `--public-ip` and `--ice-server` are optional. They are deployment inputs, not

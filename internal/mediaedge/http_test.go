@@ -1,6 +1,7 @@
 package mediaedge
 
 import (
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,117 @@ import (
 	"testing"
 	"time"
 )
+
+func TestRecordingHTTPAPIIsLoopbackOnlyAndSupportsLifecycle(t *testing.T) {
+	capture := newCaptureControl(t)
+	defer capture.close()
+	edge := newRecordingTestServer(t, capture)
+	defer edge.Close()
+	handler := newHTTPServer(edge)
+
+	remote := performHTTPRequest(
+		handler,
+		http.MethodPost,
+		"/api/v1/sources/camera/recordings",
+		`{"durationSeconds":30}`,
+		"192.0.2.10:44000",
+		map[string]string{"Content-Type": "application/json"},
+	)
+	if remote.Code != http.StatusForbidden {
+		t.Fatalf("remote recording start returned %d: %s", remote.Code, remote.Body.String())
+	}
+
+	start := performHTTPRequest(
+		handler,
+		http.MethodPost,
+		"/api/v1/sources/camera/recordings",
+		`{"durationSeconds":30}`,
+		"127.0.0.1:44000",
+		map[string]string{"Content-Type": "application/json"},
+	)
+	if start.Code != http.StatusCreated {
+		t.Fatalf("recording start returned %d: %s", start.Code, start.Body.String())
+	}
+	var created RecordingManifest
+	if err := json.Unmarshal(start.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode recording start response: %v", err)
+	}
+	if created.RecordingID == "" || created.State != RecordingWaiting {
+		t.Fatalf("recording start response = %+v", created)
+	}
+
+	sendRecordingRTP(t, edge.RTPAddress("camera"), recordingRTPPacket(
+		40,
+		270_000,
+		true,
+		stapAPayload(
+			[]byte{0x67, 0x42, 0xe0, 0x1f},
+			[]byte{0x68, 0xce, 0x06},
+			[]byte{0x65, 0x01},
+		),
+	))
+	eventually(t, time.Second, func() bool {
+		current, found := edge.Recording(created.RecordingID)
+		return found && current.AccessUnitsWritten == 1
+	})
+
+	status := performHTTPRequest(
+		handler,
+		http.MethodGet,
+		"/api/v1/recordings/"+created.RecordingID,
+		"",
+		"127.0.0.1:44000",
+		nil,
+	)
+	if status.Code != http.StatusOK {
+		t.Fatalf("recording status returned %d: %s", status.Code, status.Body.String())
+	}
+	list := performHTTPRequest(
+		handler,
+		http.MethodGet,
+		"/api/v1/recordings",
+		"",
+		"127.0.0.1:44000",
+		nil,
+	)
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), created.RecordingID) {
+		t.Fatalf("recording list returned %d: %s", list.Code, list.Body.String())
+	}
+	stop := performHTTPRequest(
+		handler,
+		http.MethodDelete,
+		"/api/v1/recordings/"+created.RecordingID,
+		"",
+		"127.0.0.1:44000",
+		nil,
+	)
+	if stop.Code != http.StatusOK {
+		t.Fatalf("recording stop returned %d: %s", stop.Code, stop.Body.String())
+	}
+	var stopped RecordingManifest
+	if err := json.Unmarshal(stop.Body.Bytes(), &stopped); err != nil {
+		t.Fatalf("decode recording stop response: %v", err)
+	}
+	if stopped.State != RecordingComplete || len(stopped.Segments) != 1 {
+		t.Fatalf("recording stop response = %+v", stopped)
+	}
+}
+
+func TestRecordingHTTPAPIReportsDisabledFeature(t *testing.T) {
+	handler := newHTTPTestServer(t, "camera", nil)
+	response := performHTTPRequest(
+		handler,
+		http.MethodPost,
+		"/api/v1/sources/camera/recordings",
+		`{"durationSeconds":30}`,
+		"127.0.0.1:44000",
+		map[string]string{"Content-Type": "application/json"},
+	)
+	if response.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(response.Body.String(), ErrRecordingDisabled.Error()) {
+		t.Fatalf("disabled recording returned %d: %s", response.Code, response.Body.String())
+	}
+}
 
 func TestExplicitWildcardHTTPListenerServesDirectSurface(t *testing.T) {
 	capture := newCaptureControl(t)

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -51,14 +52,19 @@ type sourceControlResponse struct {
 	FrameID         string   `json:"frameId,omitempty"`
 	// TimestampNanoseconds is in the source clock domain. A Gazebo source uses
 	// simulation time, so calling it UnixNano would be materially incorrect.
-	TimestampNanoseconds int64     `json:"timestampNanoseconds,omitempty"`
-	Width                int       `json:"width,omitempty"`
-	Height               int       `json:"height,omitempty"`
-	PixelFormat          string    `json:"pixelFormat,omitempty"`
-	JPEGBytes            int       `json:"jpegBytes,omitempty"`
-	RGBBytes             int       `json:"rgbBytes,omitempty"`
-	CameraMatrix         []float64 `json:"cameraMatrix,omitempty"`
-	Distortion           []float64 `json:"distortion,omitempty"`
+	TimestampNanoseconds int64 `json:"timestampNanoseconds,omitempty"`
+	// TimestampClockDomain uses the same vocabulary as xgc_camera_msgs/StreamInfo:
+	// simulation, system_realtime, monotonic, device, or unknown.
+	TimestampClockDomain string              `json:"timestampClockDomain,omitempty"`
+	Width                int                 `json:"width,omitempty"`
+	Height               int                 `json:"height,omitempty"`
+	PixelFormat          string              `json:"pixelFormat,omitempty"`
+	JPEGBytes            int                 `json:"jpegBytes,omitempty"`
+	RGBBytes             int                 `json:"rgbBytes,omitempty"`
+	CameraMatrix         []float64           `json:"cameraMatrix,omitempty"`
+	Distortion           []float64           `json:"distortion,omitempty"`
+	RenderPose           *SnapshotRenderPose `json:"renderPose,omitempty"`
+	PoseFrameID          string              `json:"poseFrameId,omitempty"`
 }
 
 func describeSource(ctx context.Context, config SourceConfig) (SourceConfig, error) {
@@ -122,7 +128,7 @@ func describeSource(ctx context.Context, config SourceConfig) (SourceConfig, err
 	if config.hasExpectedMetadata() &&
 		(response.Width != config.Width ||
 			response.Height != config.Height ||
-			response.FPS != config.FPS ||
+			!nominalFrameRatesMatch(response.FPS, config.FPS) ||
 			response.FrameID != config.FrameID) {
 		return SourceConfig{}, fmt.Errorf(
 			"capture source metadata %dx%d@%g frameId=%q does not match expected %dx%d@%g frameId=%q",
@@ -141,6 +147,15 @@ func describeSource(ctx context.Context, config SourceConfig) (SourceConfig, err
 	config.FPS = response.FPS
 	config.FrameID = response.FrameID
 	return config, nil
+}
+
+func nominalFrameRatesMatch(actual float64, expected float64) bool {
+	// Gazebo/SDF and camera-driver APIs may round the same nominal cadence
+	// through float32 before returning it as a JSON float64 (for example,
+	// 30 Hz becomes 30.0000003). Keep the metadata assertion strict enough to
+	// reject a genuinely different mode while accepting representation noise.
+	tolerance := math.Max(1e-6, math.Abs(expected)*1e-6)
+	return math.Abs(actual-expected) <= tolerance
 }
 
 func validateSourceRTPDestination(expectedAddress string, describedHost string, describedPort int) error {
@@ -188,6 +203,7 @@ type Snapshot struct {
 	SourceID             string
 	FrameID              string
 	TimestampNanoseconds int64
+	TimestampClockDomain string
 	Width                int
 	Height               int
 	PixelFormat          string
@@ -195,29 +211,64 @@ type Snapshot struct {
 	RGB                  []byte
 	CameraMatrix         []float64
 	Distortion           []float64
+	RenderPose           *SnapshotRenderPose
+	PoseFrameID          string
 	ExpiresAt            time.Time
+}
+
+// SnapshotRenderPose is the optional camera pose at the exact render captured
+// by a source snapshot. Older sources omit both this value and PoseFrameID.
+type SnapshotRenderPose struct {
+	Position    SnapshotVector3    `json:"position"`
+	Orientation SnapshotQuaternion `json:"orientation"`
+}
+
+type SnapshotVector3 struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	Z float64 `json:"z"`
+}
+
+type SnapshotQuaternion struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	Z float64 `json:"z"`
+	W float64 `json:"w"`
 }
 
 func (snapshot Snapshot) metadata() snapshotMetadata {
 	return snapshotMetadata{
 		SnapshotID: snapshot.ID, SourceID: snapshot.SourceID, FrameID: snapshot.FrameID,
-		TimestampNanoseconds: snapshot.TimestampNanoseconds, Width: snapshot.Width, Height: snapshot.Height,
+		TimestampNanoseconds: snapshot.TimestampNanoseconds, TimestampClockDomain: snapshot.TimestampClockDomain,
+		Width: snapshot.Width, Height: snapshot.Height,
 		PixelFormat: snapshot.PixelFormat, JPEGBytes: len(snapshot.JPEG), CameraMatrix: append([]float64(nil), snapshot.CameraMatrix...),
 		Distortion: append([]float64(nil), snapshot.Distortion...),
+		RenderPose: cloneSnapshotRenderPose(snapshot.RenderPose), PoseFrameID: snapshot.PoseFrameID,
 	}
 }
 
 type snapshotMetadata struct {
-	SnapshotID           string    `json:"snapshotId"`
-	SourceID             string    `json:"sourceId"`
-	FrameID              string    `json:"frameId"`
-	TimestampNanoseconds int64     `json:"timestampNanoseconds"`
-	Width                int       `json:"width"`
-	Height               int       `json:"height"`
-	PixelFormat          string    `json:"pixelFormat"`
-	JPEGBytes            int       `json:"jpegBytes"`
-	CameraMatrix         []float64 `json:"cameraMatrix"`
-	Distortion           []float64 `json:"distortion"`
+	SnapshotID           string              `json:"snapshotId"`
+	SourceID             string              `json:"sourceId"`
+	FrameID              string              `json:"frameId"`
+	TimestampNanoseconds int64               `json:"timestampNanoseconds"`
+	TimestampClockDomain string              `json:"timestampClockDomain"`
+	Width                int                 `json:"width"`
+	Height               int                 `json:"height"`
+	PixelFormat          string              `json:"pixelFormat"`
+	JPEGBytes            int                 `json:"jpegBytes"`
+	CameraMatrix         []float64           `json:"cameraMatrix"`
+	Distortion           []float64           `json:"distortion"`
+	RenderPose           *SnapshotRenderPose `json:"renderPose,omitempty"`
+	PoseFrameID          string              `json:"poseFrameId,omitempty"`
+}
+
+func cloneSnapshotRenderPose(pose *SnapshotRenderPose) *SnapshotRenderPose {
+	if pose == nil {
+		return nil
+	}
+	copy := *pose
+	return &copy
 }
 
 func callSourceControl(

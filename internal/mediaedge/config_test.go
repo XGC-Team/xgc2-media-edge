@@ -3,6 +3,7 @@ package mediaedge
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAllowedOriginsAreExactHTTPOrigins(t *testing.T) {
@@ -93,5 +94,54 @@ func TestRTPIngressRequiresFixedLoopbackPort(t *testing.T) {
 				t.Fatalf("invalid RTP ingress address %q was accepted", address)
 			}
 		})
+	}
+}
+
+func TestRecordingConfigIsExplicitAndCapacityBounded(t *testing.T) {
+	base := Config{
+		ControlAddress: "127.0.0.1:18090",
+		Sources: []SourceConfig{{
+			ID: "camera", RTPListenAddress: "127.0.0.1:5004",
+			ControlSocket: "/tmp/camera.sock",
+		}},
+	}
+	base.Recording.QueuePackets = 100
+	if _, err := base.normalized(); err == nil ||
+		!strings.Contains(err.Error(), "recording root is required") {
+		t.Fatalf("recording option without root error = %v", err)
+	}
+
+	base.Recording = RecordingConfig{Root: "relative", MaxBitrateBitsPerSecond: 1_000_000}
+	if _, err := base.normalized(); err == nil ||
+		!strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("relative recording root error = %v", err)
+	}
+
+	base.Recording = RecordingConfig{Root: t.TempDir()}
+	if _, err := base.normalized(); err == nil ||
+		!strings.Contains(err.Error(), "peak bitrate") {
+		t.Fatalf("missing recording peak bitrate error = %v", err)
+	}
+
+	base.Recording = RecordingConfig{
+		Root: t.TempDir(), MaxBitrateBitsPerSecond: 36_000_000,
+	}
+	normalized, err := base.normalized()
+	if err != nil {
+		t.Fatalf("normalize enabled recording: %v", err)
+	}
+	recording := normalized.Recording
+	if recording.FFmpegPath != "ffmpeg" ||
+		recording.QueuePackets != defaultRecordingQueuePackets ||
+		recording.SegmentDuration != defaultRecordingSegment ||
+		recording.MaxDuration != defaultRecordingMaxDuration ||
+		recording.FinalizeTimeout != defaultRecordingFinalize ||
+		recording.KeyframeTimeout != defaultRecordingKeyframeWait ||
+		recording.MinimumFreeBytes != defaultRecordingMinimumFree ||
+		recording.CapacitySafetyFactor != defaultRecordingCapacityFactor {
+		t.Fatalf("recording defaults = %+v", recording)
+	}
+	if recording.SegmentDuration < time.Second {
+		t.Fatalf("recording segment duration = %s", recording.SegmentDuration)
 	}
 }

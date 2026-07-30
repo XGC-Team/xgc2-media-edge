@@ -72,9 +72,11 @@ Priority: optional
 Architecture: ${arch}
 Maintainer: XGC2 <apt@example.com>
 Depends: ca-certificates
+Suggests: ffmpeg
 Description: Target-resident XGC2 H264/WebRTC media data plane
  Receives co-located H264/RTP and source-control traffic, fans encoded media
- out to WebRTC viewers, and serves immutable camera calibration snapshots.
+ out to WebRTC viewers, optionally records stream-copy Matroska segments, and
+ serves immutable camera calibration snapshots.
 EOF
 
 test -x "${pkg_root}/usr/bin/xgc-media-edge"
