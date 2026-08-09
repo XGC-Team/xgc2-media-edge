@@ -79,13 +79,13 @@ type RecordingConfig struct {
 // reachable. The four media metadata fields are optional expected values: all
 // four must be omitted or all four must match the authoritative describe reply.
 type SourceConfig struct {
-	ID               string
-	RTPListenAddress string
-	ControlSocket    string
-	Width            int
-	Height           int
-	FPS              float64
-	FrameID          string
+	ID               string  `json:"id"`
+	RTPListenAddress string  `json:"rtpListenAddress"`
+	ControlSocket    string  `json:"controlSocket"`
+	Width            int     `json:"width,omitempty"`
+	Height           int     `json:"height,omitempty"`
+	FPS              float64 `json:"fps,omitempty"`
+	FrameID          string  `json:"frameId,omitempty"`
 }
 
 func (config Config) normalized() (Config, error) {

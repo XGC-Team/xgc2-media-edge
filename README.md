@@ -1,8 +1,8 @@
 # XGC2 Media Edge
 
 `xgc2-media-edge` is the target-resident XGC2 video data plane. Each process
-instance accepts one configured, co-located H264/RTP camera source, exposes a
-small direct-browser signaling API, and fans that encoded source out to WebRTC
+instance accepts one or more configured, co-located H264/RTP sources, exposes a
+small direct-browser signaling API, and fans each encoded source out to WebRTC
 viewers without decoding, transcoding, or starting another encoder per viewer.
 
 The product is intentionally independent from ROS, Gazebo, and camera drivers,
@@ -47,7 +47,7 @@ The remotely reachable HTTP surface is deliberately small:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/` | Embedded, dependency-free WebRTC player |
+| `GET` | `/`, `/?source={sourceId}`, `/sources/{sourceId}` | Embedded, dependency-free WebRTC player |
 | `GET` | `/assets/player.css` | Embedded player style |
 | `GET` | `/assets/player.js` | Embedded player signaling logic |
 | `GET` | `/healthz` | Metadata-only health |
@@ -59,10 +59,12 @@ every non-loopback client. Recording control is also loopback-only and is
 documented below. Live video is never served as HTTP pixels: there is no MJPEG,
 HLS, JPEG polling, discovery, SSE, or WebSocket API.
 
-The embedded page receives only the configured source ID from the server. Its
+The embedded page receives only its selected source ID from the server. Its
 plain browser code creates a recv-only `RTCPeerConnection`, waits for local ICE
 gathering, attaches the remote track to `<video>`, and deletes the session when
-the page exits.
+the page exits. The default `/` player selects the first configured source;
+`?source=` and `/sources/` select another source without creating another HTTP
+service.
 
 Same-origin use of the embedded player needs no CORS configuration. To embed
 the same direct protocol in another WebUI, repeat `--allowed-origin` with each
@@ -81,7 +83,7 @@ the trusted network.
 
 ## Source contract
 
-Each process instance is configured with one source that supplies:
+Each configured source supplies:
 
 - a stable source ID;
 - a loopback H264/RTP endpoint using payload type 96;
@@ -288,6 +290,43 @@ Example for a co-located source that already implements the contract above:
   --recording-max-bitrate 13500000
 ```
 
+The legacy flags above remain the shortest single-source form. For multiple
+independently controlled sources, use one strict JSON document and omit every
+legacy single-source flag:
+
+```json
+{
+  "sources": [
+    {
+      "id": "front",
+      "rtpListenAddress": "127.0.0.1:5004",
+      "controlSocket": "/tmp/xgc2/media/front.sock"
+    },
+    {
+      "id": "world",
+      "rtpListenAddress": "127.0.0.1:5006",
+      "controlSocket": "/tmp/xgc2/media/world.sock",
+      "width": 3840,
+      "height": 2160,
+      "fps": 30,
+      "frameId": "world_camera_optical"
+    }
+  ]
+}
+```
+
+```bash
+./.ci/bin/xgc-media-edge \
+  --control-address 0.0.0.0:18090 \
+  --sources-config /run/xgc2/media/sources.json
+```
+
+Unknown JSON fields, an empty source list, duplicate IDs, non-loopback RTP
+listeners, reused UDP ports, or a mismatch with a source's authoritative
+`describe` response fail startup. Every source keeps its own control socket,
+viewer count, active state, RTP counters, snapshots, and recordings while
+sharing the Edge HTTP/WebRTC listener.
+
 `--public-ip` and `--ice-server` are optional. They are deployment inputs, not
 ground-station discovery. Repeat either flag when multiple values are needed.
 The HTTP port carries signaling only; ICE selects the UDP path for SRTP, so the
@@ -300,7 +339,8 @@ curl --fail http://127.0.0.1:18090/healthz
 ```
 
 From another machine, opening `http://TARGET_IP:18090/` starts a direct session
-with the configured source.
+with the first source. Open `http://TARGET_IP:18090/sources/world` for a named
+source; product panels should call the existing source-scoped session API.
 
 ## Debian package
 

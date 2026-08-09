@@ -88,7 +88,10 @@ func (server *httpServer) route(writer http.ResponseWriter, request *http.Reques
 	}
 	switch {
 	case request.Method == http.MethodGet && request.URL.Path == "/":
-		server.servePlayer(writer)
+		server.serveSelectedPlayer(writer, request.URL.Query().Get("source"))
+		return
+	case request.Method == http.MethodGet && len(parts) == 2 && parts[0] == "sources":
+		server.serveSelectedPlayer(writer, parts[1])
 		return
 	case request.Method == http.MethodGet && request.URL.Path == "/assets/player.css":
 		server.servePlayerAsset(writer, "player/player.css", "text/css; charset=utf-8")
@@ -200,14 +203,35 @@ func snapshotHTTPRoute(parts []string) bool {
 			parts[0] == "api" && parts[1] == "v1" && parts[2] == "snapshots")
 }
 
-func (server *httpServer) servePlayer(writer http.ResponseWriter) {
+func (server *httpServer) serveSelectedPlayer(writer http.ResponseWriter, requested string) {
+	sourceID := strings.TrimSpace(requested)
+	if sourceID == "" {
+		sourceID = server.server.config.Sources[0].ID
+	}
+	if !server.hasConfiguredSource(sourceID) {
+		writeError(writer, http.StatusNotFound, "media source was not found")
+		return
+	}
+	server.servePlayer(writer, sourceID)
+}
+
+func (server *httpServer) hasConfiguredSource(sourceID string) bool {
+	for _, source := range server.server.config.Sources {
+		if source.ID == sourceID {
+			return true
+		}
+	}
+	return false
+}
+
+func (server *httpServer) servePlayer(writer http.ResponseWriter, sourceID string) {
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	writer.Header().Set("Cache-Control", "no-store")
 	setPlayerSecurityHeaders(writer.Header())
 	writer.WriteHeader(http.StatusOK)
 	_ = playerPage.ExecuteTemplate(writer, "index.html", struct {
 		SourceID string
-	}{SourceID: server.server.config.Sources[0].ID})
+	}{SourceID: sourceID})
 }
 
 func (server *httpServer) servePlayerAsset(writer http.ResponseWriter, name string, contentType string) {

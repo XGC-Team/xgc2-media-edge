@@ -23,6 +23,7 @@ var version = "dev"
 func main() {
 	var (
 		controlAddress          = flag.String("control-address", "127.0.0.1:18090", "HTTP listen address; explicitly bind a target interface for remote browsers")
+		sourcesConfig           = flag.String("sources-config", "", "JSON file containing one or more local media sources; mutually exclusive with legacy single-source flags")
 		sourceID                = flag.String("source-id", "", "stable media source ID")
 		rtpAddress              = flag.String("rtp-listen-address", "", "loopback H264/RTP ingress address")
 		controlSocket           = flag.String("source-control-socket", "", "absolute Unix socket owned by the capture source")
@@ -58,13 +59,17 @@ func main() {
 		return
 	}
 
+	sources, err := resolveSources(*sourcesConfig, legacySourceFlags{
+		ID: *sourceID, RTPListenAddress: *rtpAddress, ControlSocket: *controlSocket,
+		Width: *width, Height: *height, FPS: *fps, FrameID: *frameID,
+	})
+	if err != nil {
+		log.Fatalf("invalid XGC media-edge source configuration: %v", err)
+	}
 	config := mediaedge.Config{
-		ControlAddress: *controlAddress,
-		AllowedOrigins: append([]string(nil), allowedOrigins...),
-		Sources: []mediaedge.SourceConfig{{
-			ID: *sourceID, RTPListenAddress: *rtpAddress, ControlSocket: *controlSocket,
-			Width: *width, Height: *height, FPS: *fps, FrameID: *frameID,
-		}},
+		ControlAddress:     *controlAddress,
+		AllowedOrigins:     append([]string(nil), allowedOrigins...),
+		Sources:            sources,
 		PublicIPs:          append([]string(nil), publicIPs...),
 		SessionGracePeriod: *grace,
 		SnapshotTTL:        *snapshotTTL,
@@ -93,7 +98,7 @@ func main() {
 	if err := server.Start(); err != nil {
 		log.Fatalf("start XGC media edge: %v", err)
 	}
-	log.Printf("xgc-media-edge ready on %s for source %s", server.ControlAddress(), *sourceID)
+	log.Printf("xgc-media-edge ready on %s for sources %s", server.ControlAddress(), sourceIDs(sources))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

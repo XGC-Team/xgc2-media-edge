@@ -259,6 +259,34 @@ func TestPlayerEscapesServerInjectedSourceID(t *testing.T) {
 	}
 }
 
+func TestPlayerSelectsOneConfiguredSourceWithoutChangingSessionAPI(t *testing.T) {
+	handler := newHTTPServer(&Server{config: Config{Sources: []SourceConfig{
+		{ID: "front"},
+		{ID: "world"},
+	}}})
+
+	query := performHTTPRequest(
+		handler, http.MethodGet, "/?source=world", "", "192.0.2.44:42000", nil,
+	)
+	if query.Code != http.StatusOK ||
+		!strings.Contains(query.Body.String(), `data-source-id="world"`) {
+		t.Fatalf("selected player returned %d: %s", query.Code, query.Body.String())
+	}
+	path := performHTTPRequest(
+		handler, http.MethodGet, "/sources/front", "", "192.0.2.44:42000", nil,
+	)
+	if path.Code != http.StatusOK ||
+		!strings.Contains(path.Body.String(), `data-source-id="front"`) {
+		t.Fatalf("source player returned %d: %s", path.Code, path.Body.String())
+	}
+	unknown := performHTTPRequest(
+		handler, http.MethodGet, "/sources/missing", "", "192.0.2.44:42000", nil,
+	)
+	if unknown.Code != http.StatusNotFound {
+		t.Fatalf("unknown source player returned %d: %s", unknown.Code, unknown.Body.String())
+	}
+}
+
 func TestCORSUsesExactOriginsAndMinimalPreflight(t *testing.T) {
 	handler := newHTTPTestServer(t, "camera", []string{"https://station.example:8443"})
 	headers := map[string]string{
