@@ -135,11 +135,15 @@ type sourceDescription struct {
 type SourceStatus struct {
 	ID              string    `json:"id"`
 	Active          bool      `json:"active"`
+	Available       bool      `json:"available"`
+	Online          bool      `json:"online"`
 	Consumers       int       `json:"consumers"`
 	Viewers         int       `json:"viewers"`
 	RecordingID     string    `json:"recordingId,omitempty"`
 	LastPacketAt    time.Time `json:"lastPacketAt,omitempty"`
 	PacketsReceived uint64    `json:"packetsReceived"`
+	BytesReceived   uint64    `json:"bytesReceived"`
+	FramesInError   uint64    `json:"framesInError"`
 	Width           int       `json:"width"`
 	Height          int       `json:"height"`
 	FPS             float64   `json:"fps"`
@@ -267,6 +271,17 @@ func (server *Server) ControlAddress() string {
 		return ""
 	}
 	return server.listener.Addr().String()
+}
+
+// HTTPConfig exposes an immutable copy to the shared product HTTP surface.
+func (server *Server) HTTPConfig() Config {
+	if server == nil {
+		return Config{}
+	}
+	config := server.config
+	config.AllowedOrigins = append([]string(nil), config.AllowedOrigins...)
+	config.Sources = append([]SourceConfig(nil), config.Sources...)
+	return config
 }
 
 // RTPAddress returns the resolved local ingress endpoint for a source. It is

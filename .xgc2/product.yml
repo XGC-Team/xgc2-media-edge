@@ -3,8 +3,8 @@ id: xgc2-media-edge
 name: XGC2 Media Edge
 version: 0.4.0-1
 kind: toolchain-apt
-summary: Target-resident H264/RTP WebRTC fanout, stream-copy recording, and immutable
-  camera snapshot service for XGC2.
+summary: XGC2 source lifecycle and scientific metadata wrapper around pinned MediaMTX
+  H264/RTP, WHEP/WebRTC fanout, and stream-copy recording.
 apt:
   distribution: focal,jammy,noble
   install:
@@ -25,14 +25,17 @@ usage:
     '
   notes: 'The process is started and supervised by an XGC2 process definition.
 
-    This package deliberately installs no systemd unit and has no dependency on
+  This package deliberately installs no systemd unit and has no dependency on
 
     ROS, XGC2 Core, or XGC2 Agent.
+
+    MediaMTX v1.20.0 is bundled and checksum-pinned; no runtime download occurs.
 
     '
 ownership:
   paths:
   - /usr/bin/xgc-media-edge
+  - /usr/lib/xgc2-media-edge/mediamtx
 release:
   repository: lxk36/xgc2-media-edge
   ref: main

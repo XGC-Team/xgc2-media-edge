@@ -1,6 +1,6 @@
-// xgc-media-edge is the target-resident XGC video data plane. It intentionally
-// has no Core or Agent URL: browsers signal directly to its HTTP endpoint, and
-// ICE/TURN carries live RTP directly between each browser and this process.
+// xgc-media-edge is the target-resident XGC video product boundary. It owns
+// Experiment/source lifecycle and delegates the standard RTP/WebRTC/WHEP media
+// plane to a pinned MediaMTX child. It intentionally has no Core or Agent URL.
 package main
 
 import (
@@ -23,6 +23,14 @@ var version = "dev"
 func main() {
 	var (
 		controlAddress          = flag.String("control-address", "127.0.0.1:18090", "HTTP listen address; explicitly bind a target interface for remote browsers")
+		transport               = flag.String("transport", "mediamtx", "media kernel: mediamtx (default) or legacy-pion (temporary migration comparison only)")
+		mediaMTXExecutable      = flag.String("mediamtx-executable", "/usr/lib/xgc2-media-edge/mediamtx", "absolute path to the pinned MediaMTX binary")
+		mediaMTXRuntimeDir      = flag.String("mediamtx-runtime-dir", "/run/xgc2/media-edge", "absolute private runtime directory for generated MediaMTX configuration")
+		mediaMTXAPIAddress      = flag.String("mediamtx-api-address", "127.0.0.1:19997", "loopback-only MediaMTX control API address")
+		mediaMTXWHEPAddress     = flag.String("mediamtx-whep-address", "127.0.0.1:18889", "loopback-only MediaMTX WHEP HTTP address; XGC proxies browser signaling")
+		mediaMTXICEUDPAddress   = flag.String("webrtc-ice-udp-address", "0.0.0.0:18189", "MediaMTX fixed WebRTC ICE UDP listener")
+		mediaMTXICETCPAddress   = flag.String("webrtc-ice-tcp-address", "", "optional MediaMTX fixed WebRTC ICE TCP listener")
+		mediaMTXInterfaceIPs    = flag.Bool("webrtc-interface-ips", true, "advertise target interface IPs as ICE candidates")
 		sourcesConfig           = flag.String("sources-config", "", "JSON file containing one or more local media sources; mutually exclusive with legacy single-source flags")
 		sourceID                = flag.String("source-id", "", "stable media source ID")
 		rtpAddress              = flag.String("rtp-listen-address", "", "loopback H264/RTP ingress address")
@@ -91,7 +99,20 @@ func main() {
 			URLs: append([]string(nil), iceURLs...), Username: strings.TrimSpace(*iceUsername), Credential: *iceCredential,
 		}}
 	}
-	server, err := mediaedge.New(config)
+	var server mediaKernel
+	switch strings.ToLower(strings.TrimSpace(*transport)) {
+	case "mediamtx":
+		server, err = mediaedge.NewMediaMTX(config, mediaedge.MediaMTXSettings{
+			Executable: *mediaMTXExecutable, RuntimeDir: *mediaMTXRuntimeDir,
+			APIAddress: *mediaMTXAPIAddress, WHEPAddress: *mediaMTXWHEPAddress,
+			ICEUDPAddress: *mediaMTXICEUDPAddress, ICETCPAddress: *mediaMTXICETCPAddress,
+			IPsFromInterfaces: *mediaMTXInterfaceIPs,
+		})
+	case "legacy-pion":
+		server, err = mediaedge.New(config)
+	default:
+		log.Fatalf("invalid XGC media-edge transport %q", *transport)
+	}
 	if err != nil {
 		log.Fatalf("invalid XGC media-edge configuration: %v", err)
 	}
@@ -106,6 +127,12 @@ func main() {
 	if err := server.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, "stop XGC media edge:", err)
 	}
+}
+
+type mediaKernel interface {
+	Start() error
+	Close() error
+	ControlAddress() string
 }
 
 type multiString []string

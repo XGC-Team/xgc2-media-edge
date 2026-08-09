@@ -20,14 +20,29 @@ var playerFiles embed.FS
 var playerPage = template.Must(template.ParseFS(playerFiles, "player/index.html"))
 
 type httpServer struct {
-	server         *Server
+	server         httpBackend
 	http           *http.Server
 	allowedOrigins map[string]struct{}
 }
 
-func newHTTPServer(server *Server) *httpServer {
-	allowedOrigins := make(map[string]struct{}, len(server.config.AllowedOrigins))
-	for _, origin := range server.config.AllowedOrigins {
+type httpBackend interface {
+	HTTPConfig() Config
+	SourceStatuses() []SourceStatus
+	OpenSession(context.Context, string, SessionOffer) (SessionAnswer, error)
+	CloseSession(string) bool
+	StartRecording(context.Context, string, StartRecordingRequest) (RecordingManifest, error)
+	Recordings() []RecordingManifest
+	Recording(string) (RecordingManifest, bool)
+	StopRecording(context.Context, string) (RecordingManifest, error)
+	CaptureSnapshot(context.Context, string) (Snapshot, error)
+	Snapshot(string) (Snapshot, bool)
+	DeleteSnapshot(string) bool
+}
+
+func newHTTPServer(server httpBackend) *httpServer {
+	config := server.HTTPConfig()
+	allowedOrigins := make(map[string]struct{}, len(config.AllowedOrigins))
+	for _, origin := range config.AllowedOrigins {
 		allowedOrigins[origin] = struct{}{}
 	}
 	httpServer := &httpServer{server: server, allowedOrigins: allowedOrigins}
@@ -206,7 +221,7 @@ func snapshotHTTPRoute(parts []string) bool {
 func (server *httpServer) serveSelectedPlayer(writer http.ResponseWriter, requested string) {
 	sourceID := strings.TrimSpace(requested)
 	if sourceID == "" {
-		sourceID = server.server.config.Sources[0].ID
+		sourceID = server.server.HTTPConfig().Sources[0].ID
 	}
 	if !server.hasConfiguredSource(sourceID) {
 		writeError(writer, http.StatusNotFound, "media source was not found")
@@ -216,7 +231,7 @@ func (server *httpServer) serveSelectedPlayer(writer http.ResponseWriter, reques
 }
 
 func (server *httpServer) hasConfiguredSource(sourceID string) bool {
-	for _, source := range server.server.config.Sources {
+	for _, source := range server.server.HTTPConfig().Sources {
 		if source.ID == sourceID {
 			return true
 		}

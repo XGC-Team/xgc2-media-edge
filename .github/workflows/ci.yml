@@ -114,7 +114,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            dpkg-dev fakeroot file
+            curl dpkg-dev fakeroot file
 
       - name: Build deb
         env:
