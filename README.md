@@ -292,7 +292,8 @@ Example for a co-located source that already implements the contract above:
 
 The legacy flags above remain the shortest single-source form. For multiple
 independently controlled sources, use one strict JSON document and omit every
-legacy single-source flag:
+legacy single-source flag. A ready-to-copy two-source document is checked in at
+`examples/two-sources.json`:
 
 ```json
 {

@@ -1,4 +1,5 @@
 /.ci/
+/.work/
 /build/
 /debs/
 /dist/

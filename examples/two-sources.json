@@ -1,0 +1,14 @@
+{
+  "sources": [
+    {
+      "id": "front",
+      "rtpListenAddress": "127.0.0.1:5004",
+      "controlSocket": "/tmp/xgc2/media/front.sock"
+    },
+    {
+      "id": "world",
+      "rtpListenAddress": "127.0.0.1:5006",
+      "controlSocket": "/tmp/xgc2/media/world.sock"
+    }
+  ]
+}
