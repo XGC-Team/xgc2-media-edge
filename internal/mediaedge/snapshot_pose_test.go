@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCaptureSnapshotPassesThroughOptionalSourceRenderPose(t *testing.T) {
@@ -17,7 +18,19 @@ func TestCaptureSnapshotPassesThroughOptionalSourceRenderPose(t *testing.T) {
 	}
 	capture.snapshotPoseFrameID = "gazebo_world"
 	capture.descriptionMu.Unlock()
-	server := newTestServer(t, capture)
+	rtpAddress := availableLoopbackRTPAddress(t)
+	capture.setRTPDestination(t, rtpAddress)
+	config, err := (Config{
+		ControlAddress: "127.0.0.1:0", SessionGracePeriod: 5 * time.Millisecond,
+		Sources: []SourceConfig{{ID: "camera", RTPListenAddress: rtpAddress, ControlSocket: capture.socket}},
+	}).normalized()
+	if err != nil {
+		t.Fatalf("normalize MediaMTX snapshot server: %v", err)
+	}
+	server := newMediaMTXServer(config, MediaMTXSettings{}, newFakeMediaMTXControl("camera"), newFakeMediaMTXProcess())
+	if err := server.Start(); err != nil {
+		t.Fatalf("start MediaMTX snapshot server: %v", err)
+	}
 	defer server.Close()
 
 	snapshot, err := server.CaptureSnapshot(context.Background(), "camera")

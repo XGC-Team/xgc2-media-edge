@@ -24,17 +24,23 @@ Conforming H264 capture source
   `-- describe/lifecycle/keyframe/snapshot over a Unix socket
                       |
                       v
-               xgc-media-edge
-                 |           |-- WebRTC/SRTP to browser viewers
-                 |           `-- optional H264 stream-copy recording
-                 `-- HTTP signaling directly from the browser
+        xgc-media-edge control layer
+          |-- source leases, snapshots, recording intent, manifests
+          `-- WHEP compatibility proxy
+                       |
+                       v
+               pinned MediaMTX
+                 |-- WebRTC/SRTP over fixed 18189/UDP
+                 `-- optional native stream-copy fMP4 recording
 ```
 
 The HTTP listener defaults to `127.0.0.1:18090`. A deployment may explicitly
 bind it to a target interface or `0.0.0.0` so a browser can reach it. RTP ingress
 is different: it is always loopback-only and cannot be relaxed. The process has
 no Core URL, performs no discovery, and never dials a ground station. A
-browser-originated offer determines the ICE path used for SRTP.
+browser-originated offer is proxied to MediaMTX WHEP. MediaMTX owns RTP
+parsing, fanout, ICE and SRTP; the fixed direct ICE listener is
+`0.0.0.0:18189/udp` unless explicitly configured otherwise.
 
 The package installs no systemd unit. XGC2's process catalog remains the single
 owner of process definitions, readiness probes, resource declarations, and
@@ -53,6 +59,9 @@ The remotely reachable HTTP surface is deliberately small:
 | `GET` | `/healthz` | Metadata-only health |
 | `POST` | `/api/v1/sources/{sourceId}/sessions` | Non-trickle SDP offer to answer |
 | `DELETE` | `/api/v1/sessions/{sessionId}` | Deterministic session teardown |
+
+The source-scoped session endpoints are the stable XGC product contract. They
+are a thin WHEP proxy and do not implement a second WebRTC stack.
 
 HTTP snapshot creation and retrieval retain their existing paths but reject
 every non-loopback client. Recording control is also loopback-only and is
@@ -166,28 +175,11 @@ requires an explicit source peak bitrate for conservative capacity admission:
 --recording-max-bitrate 36000000
 ```
 
-FFmpeg is used solely as a Matroska muxer. The Debian package depends on it so
-recording is available after a clean install. When recording is enabled, Edge
-resolves `--recording-ffmpeg` (default `ffmpeg`) at startup and fails with a
-clear error if it is unavailable. The invoked pipeline accepts Annex-B H264 and
-uses `-c:v copy`; it never decodes, re-encodes, changes quality, or allocates
-another NVENC session. A preview-only source build does not execute FFmpeg.
-
-One receive loop performs RTP continuity rewriting once, then sends that same
-encoded stream to both branches:
-
-- Pion's shared WebRTC RTP track;
-- a non-blocking, bounded recorder queue and independent writer.
-
-A slow disk or muxer therefore cannot block preview. Queue overflow, RTP packet
-loss, malformed H264 packetization, and source clock restarts are recorded as
-discontinuities. The writer closes the preceding valid segment, discards
-dependent frames, requests a keyframe, and resumes only from a complete
-SPS/PPS+IDR access unit. Segment duration is a target: a cut occurs at the first
-IDR at or after the configured duration, never between dependent frames. Only
-one recording may be active per source; any number of viewers may join or leave
-without changing it. A recording is itself a source consumer, so zero viewers
-does not stop capture.
+MediaMTX writes native fragmented MP4 from the same encoded H264 stream used by
+WHEP viewers. XGC does not decode, transcode, rewrite RTP, run FFmpeg, or own a
+second recorder queue. Only one recording may be active per source; viewers can
+join or leave independently. A recording retains the source lease, so zero
+viewers does not stop capture.
 
 Recording control follows the snapshot security boundary and rejects every
 non-loopback client:
@@ -227,36 +219,24 @@ RECORDING_ROOT/
   RECORDING_ID/
     manifest.json
     segments/
-      segment-000001.mkv
-      segment-000001.frames.jsonl
-      segment-000002.mkv
-      segment-000002.frames.jsonl
+      camera-segment-2026-08-09_12-00-00.mp4
+      camera-segment-2026-08-09_12-05-00.mp4
 ```
 
-FFmpeg writes `.mkv.part`; Edge fsyncs and atomically renames it only after a
-successful finalize. The per-segment JSONL frame index follows the same rule
-and records the rewritten RTP timestamp, RTP sequence range, keyframe flag,
-Annex-B byte count, segment-relative 90 kHz PTS, and Edge ingress UTC for every
-complete access unit. Edge ingress UTC is a receive-time diagnostic, not a
-claim about camera exposure or Gazebo simulation time. Offline synchronization
-must correlate the RTP timeline to a separately defined source clock. Matroska
-playback uses the configured nominal frame rate; the JSONL RTP timeline is
-authoritative when source frames were skipped or an exact external time join is
-required.
+The actual files are MediaMTX-native `.mp4` segments. XGC scans only finalized
+regular files beneath the canonical recording directory and records their
+relative path, byte size and lifecycle times in `manifest.json`.
 
 `manifest.json` is atomically replaced at segment boundaries and final stop. It
-contains source and codec identity, requested and actual times, queue high-water
-and overflow counts, RTP loss/discontinuities, access-unit/keyframe totals,
-bytes, finalized segments, and any failure reason. A restart preserves
-previously finalized segments and marks a nonterminal manifest failed; orphan
-`.part` files are never listed as finalized media.
+contains source and codec identity, requested and actual times, bytes, finalized
+segments, and any failure reason. Compatibility counters that belonged to the
+retired private muxer remain zero. A restart preserves previously finalized
+segments and marks a nonterminal manifest failed.
 
 Relevant tuning flags are:
 
-- `--recording-queue-packets` (default `8192`);
 - `--recording-segment-duration` (default `5m`);
 - `--recording-max-duration` (default `24h`);
-- `--recording-keyframe-timeout` (default `8s`);
 - `--recording-finalize-timeout` (default `15s`);
 - `--recording-minimum-free-bytes` (default `1073741824`);
 - `--recording-capacity-safety-factor` (default `1.20`).
@@ -290,9 +270,9 @@ Example for a co-located source that already implements the contract above:
   --recording-max-bitrate 13500000
 ```
 
-The legacy flags above remain the shortest single-source form. For multiple
+The flags above remain the shortest single-source form. For multiple
 independently controlled sources, use one strict JSON document and omit every
-legacy single-source flag. A ready-to-copy two-source document is checked in at
+single-source flag. A ready-to-copy two-source document is checked in at
 `examples/two-sources.json`:
 
 ```json
@@ -330,8 +310,9 @@ sharing the Edge HTTP/WebRTC listener.
 
 `--public-ip` and `--ice-server` are optional. They are deployment inputs, not
 ground-station discovery. Repeat either flag when multiple values are needed.
-The HTTP port carries signaling only; ICE selects the UDP path for SRTP, so the
-target firewall must also permit the deployment's selected ICE path.
+The HTTP port carries signaling only. The target firewall and container mapping
+must permit fixed `18189/udp`; additional STUN/TURN inputs do not reintroduce a
+private fanout implementation.
 
 Readiness remains available locally even when the listener is remotely bound:
 

@@ -13,8 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/pion/webrtc/v4"
 )
 
 var stableSourceID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
@@ -31,11 +29,9 @@ const (
 	defaultSnapshotTTL = 15 * time.Second
 	maximumSnapshots   = 2
 
-	defaultRecordingQueuePackets   = 8192
 	defaultRecordingSegment        = 5 * time.Minute
 	defaultRecordingMaxDuration    = 24 * time.Hour
 	defaultRecordingFinalize       = 15 * time.Second
-	defaultRecordingKeyframeWait   = 8 * time.Second
 	defaultRecordingMinimumFree    = uint64(1 << 30)
 	defaultRecordingCapacityFactor = 1.20
 )
@@ -43,17 +39,26 @@ const (
 // Config is the complete, target-local configuration of one media edge. The
 // HTTP listener is loopback-only by default, but may be explicitly bound to a
 // target interface for direct browser signaling. Browser media candidates are
-// created by Pion and can use direct ICE or a configured TURN service.
+// created by MediaMTX and can use direct ICE or a configured TURN service.
 type Config struct {
 	ControlAddress       string
 	AllowedOrigins       []string
 	Sources              []SourceConfig
-	ICEServers           []webrtc.ICEServer
+	ICEServers           []ICEServerConfig
 	PublicIPs            []string
 	SessionGracePeriod   time.Duration
 	SnapshotTTL          time.Duration
 	SessionGatherTimeout time.Duration
 	Recording            RecordingConfig
+}
+
+// ICEServerConfig is the product-facing STUN/TURN contract. The media kernel
+// translates it into its own configuration; XGC does not expose transport
+// implementation types through the product API.
+type ICEServerConfig struct {
+	URLs       []string
+	Username   string
+	Credential string
 }
 
 // RecordingConfig enables optional, local H264 stream-copy recording. An empty
@@ -62,13 +67,10 @@ type Config struct {
 // peak bitrate rather than an optimistic observed average.
 type RecordingConfig struct {
 	Root                    string
-	FFmpegPath              string
 	MaxBitrateBitsPerSecond uint64
-	QueuePackets            int
 	SegmentDuration         time.Duration
 	MaxDuration             time.Duration
 	FinalizeTimeout         time.Duration
-	KeyframeTimeout         time.Duration
 	MinimumFreeBytes        uint64
 	CapacitySafetyFactor    float64
 }
@@ -150,15 +152,11 @@ func (config RecordingConfig) enabled() bool {
 
 func (config RecordingConfig) normalized() (RecordingConfig, error) {
 	config.Root = strings.TrimSpace(config.Root)
-	config.FFmpegPath = strings.TrimSpace(config.FFmpegPath)
 	if config.Root == "" {
-		if config.FFmpegPath != "" ||
-			config.MaxBitrateBitsPerSecond != 0 ||
-			config.QueuePackets != 0 ||
+		if config.MaxBitrateBitsPerSecond != 0 ||
 			config.SegmentDuration != 0 ||
 			config.MaxDuration != 0 ||
 			config.FinalizeTimeout != 0 ||
-			config.KeyframeTimeout != 0 ||
 			config.MinimumFreeBytes != 0 ||
 			config.CapacitySafetyFactor != 0 {
 			return RecordingConfig{}, errors.New("media recording root is required when recording options are configured")
@@ -169,20 +167,11 @@ func (config RecordingConfig) normalized() (RecordingConfig, error) {
 		return RecordingConfig{}, errors.New("media recording root must be an absolute path")
 	}
 	config.Root = filepath.Clean(config.Root)
-	if config.FFmpegPath == "" {
-		config.FFmpegPath = "ffmpeg"
-	}
 	if config.MaxBitrateBitsPerSecond == 0 {
 		return RecordingConfig{}, errors.New("media recording peak bitrate must be configured")
 	}
 	if config.MaxBitrateBitsPerSecond > 10_000_000_000 {
 		return RecordingConfig{}, errors.New("media recording peak bitrate must not exceed 10 Gbit/s")
-	}
-	if config.QueuePackets == 0 {
-		config.QueuePackets = defaultRecordingQueuePackets
-	}
-	if config.QueuePackets < 64 || config.QueuePackets > 131_072 {
-		return RecordingConfig{}, errors.New("media recording queue must contain between 64 and 131072 RTP packets")
 	}
 	if config.SegmentDuration == 0 {
 		config.SegmentDuration = defaultRecordingSegment
@@ -201,12 +190,6 @@ func (config RecordingConfig) normalized() (RecordingConfig, error) {
 	}
 	if config.FinalizeTimeout < time.Second || config.FinalizeTimeout > time.Minute {
 		return RecordingConfig{}, errors.New("media recording finalize timeout must be between 1 second and 1 minute")
-	}
-	if config.KeyframeTimeout == 0 {
-		config.KeyframeTimeout = defaultRecordingKeyframeWait
-	}
-	if config.KeyframeTimeout < time.Second || config.KeyframeTimeout > time.Minute {
-		return RecordingConfig{}, errors.New("media recording keyframe timeout must be between 1 second and 1 minute")
 	}
 	if config.MinimumFreeBytes == 0 {
 		config.MinimumFreeBytes = defaultRecordingMinimumFree

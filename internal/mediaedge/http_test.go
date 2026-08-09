@@ -13,7 +13,24 @@ import (
 func TestRecordingHTTPAPIIsLoopbackOnlyAndSupportsLifecycle(t *testing.T) {
 	capture := newCaptureControl(t)
 	defer capture.close()
-	edge := newRecordingTestServer(t, capture)
+	rtpAddress := availableLoopbackRTPAddress(t)
+	capture.setRTPDestination(t, rtpAddress)
+	config, err := (Config{
+		ControlAddress: "127.0.0.1:0", SessionGracePeriod: 5 * time.Millisecond,
+		Sources: []SourceConfig{{ID: "camera", RTPListenAddress: rtpAddress, ControlSocket: capture.socket}},
+		Recording: RecordingConfig{
+			Root: t.TempDir(), MaxBitrateBitsPerSecond: 1_000_000,
+			SegmentDuration: time.Second, MaxDuration: time.Minute,
+			FinalizeTimeout: time.Second, MinimumFreeBytes: 1, CapacitySafetyFactor: 1,
+		},
+	}).normalized()
+	if err != nil {
+		t.Fatalf("normalize recording media edge: %v", err)
+	}
+	edge := newMediaMTXServer(config, MediaMTXSettings{}, newFakeMediaMTXControl("camera"), newFakeMediaMTXProcess())
+	if err := edge.Start(); err != nil {
+		t.Fatalf("start recording media edge: %v", err)
+	}
 	defer edge.Close()
 	handler := newHTTPServer(edge)
 
@@ -47,21 +64,6 @@ func TestRecordingHTTPAPIIsLoopbackOnlyAndSupportsLifecycle(t *testing.T) {
 	if created.RecordingID == "" || created.State != RecordingWaiting {
 		t.Fatalf("recording start response = %+v", created)
 	}
-
-	sendRecordingRTP(t, edge.RTPAddress("camera"), recordingRTPPacket(
-		40,
-		270_000,
-		true,
-		stapAPayload(
-			[]byte{0x67, 0x42, 0xe0, 0x1f},
-			[]byte{0x68, 0xce, 0x06},
-			[]byte{0x65, 0x01},
-		),
-	))
-	eventually(t, time.Second, func() bool {
-		current, found := edge.Recording(created.RecordingID)
-		return found && current.AccessUnitsWritten == 1
-	})
 
 	status := performHTTPRequest(
 		handler,
@@ -126,15 +128,16 @@ func TestExplicitWildcardHTTPListenerServesDirectSurface(t *testing.T) {
 	defer capture.close()
 	rtpAddress := availableLoopbackRTPAddress(t)
 	capture.setRTPDestination(t, rtpAddress)
-	server, err := New(Config{
+	config, err := (Config{
 		ControlAddress: "0.0.0.0:0",
 		Sources: []SourceConfig{{
 			ID: "camera", RTPListenAddress: rtpAddress, ControlSocket: capture.socket,
 		}},
-	})
+	}).normalized()
 	if err != nil {
-		t.Fatalf("create wildcard media edge: %v", err)
+		t.Fatalf("normalize wildcard media edge: %v", err)
 	}
+	server := newMediaMTXServer(config, MediaMTXSettings{}, newFakeMediaMTXControl("camera"), newFakeMediaMTXProcess())
 	defer server.Close()
 	if err := server.Start(); err != nil {
 		t.Fatalf("start wildcard media edge: %v", err)
@@ -243,7 +246,7 @@ func TestRemoteHTTPPublishesOnlyPlayerHealthAndSessions(t *testing.T) {
 func TestPlayerEscapesServerInjectedSourceID(t *testing.T) {
 	// Construct the renderer directly so this defense-in-depth test can exercise
 	// an unsafe value that normal SourceConfig validation rejects.
-	handler := newHTTPServer(&Server{config: Config{
+	handler := newHTTPServer(&MediaMTXServer{config: Config{
 		Sources: []SourceConfig{{ID: `camera" onload="alert(1)`}},
 	}})
 	response := performHTTPRequest(handler, http.MethodGet, "/", "", "192.0.2.44:42000", nil)
@@ -260,7 +263,7 @@ func TestPlayerEscapesServerInjectedSourceID(t *testing.T) {
 }
 
 func TestPlayerSelectsOneConfiguredSourceWithoutChangingSessionAPI(t *testing.T) {
-	handler := newHTTPServer(&Server{config: Config{Sources: []SourceConfig{
+	handler := newHTTPServer(&MediaMTXServer{config: Config{Sources: []SourceConfig{
 		{ID: "front"},
 		{ID: "world"},
 	}}})
@@ -399,17 +402,10 @@ func TestStandalonePlayerSameOriginNeedsNoAllowlistEntry(t *testing.T) {
 
 func newHTTPTestServer(t *testing.T, sourceID string, allowedOrigins []string) *httpServer {
 	t.Helper()
-	server, err := New(Config{
-		ControlAddress: "127.0.0.1:0",
-		AllowedOrigins: allowedOrigins,
-		Sources: []SourceConfig{{
-			ID: sourceID, RTPListenAddress: "127.0.0.1:5004",
-			ControlSocket: "/tmp/xgc-media-edge-http-test.sock",
-		}},
-	})
-	if err != nil {
-		t.Fatalf("create HTTP test media edge: %v", err)
-	}
+	server := newMediaMTXServer(Config{
+		ControlAddress: "127.0.0.1:0", AllowedOrigins: allowedOrigins,
+		Sources: []SourceConfig{{ID: sourceID, RTPListenAddress: "127.0.0.1:5004", ControlSocket: "/tmp/xgc-media-edge-http-test.sock"}},
+	}, MediaMTXSettings{}, newFakeMediaMTXControl(sourceID), newFakeMediaMTXProcess())
 	return newHTTPServer(server)
 }
 

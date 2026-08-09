@@ -78,7 +78,7 @@ Section: net
 Priority: optional
 Architecture: ${arch}
 Maintainer: XGC2 <apt@example.com>
-Depends: ca-certificates, ffmpeg
+Depends: ca-certificates
 Description: Target-resident XGC2 media lifecycle and MediaMTX gateway
  Controls co-located ROS, camera, and simulator adapters while pinned MediaMTX
  handles H264/RTP ingest, WHEP/WebRTC fanout, and stream-copy fMP4 recording.

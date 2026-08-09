@@ -105,7 +105,7 @@ func TestRecordingConfigIsExplicitAndCapacityBounded(t *testing.T) {
 			ControlSocket: "/tmp/camera.sock",
 		}},
 	}
-	base.Recording.QueuePackets = 100
+	base.Recording.SegmentDuration = time.Second
 	if _, err := base.normalized(); err == nil ||
 		!strings.Contains(err.Error(), "recording root is required") {
 		t.Fatalf("recording option without root error = %v", err)
@@ -131,12 +131,9 @@ func TestRecordingConfigIsExplicitAndCapacityBounded(t *testing.T) {
 		t.Fatalf("normalize enabled recording: %v", err)
 	}
 	recording := normalized.Recording
-	if recording.FFmpegPath != "ffmpeg" ||
-		recording.QueuePackets != defaultRecordingQueuePackets ||
-		recording.SegmentDuration != defaultRecordingSegment ||
+	if recording.SegmentDuration != defaultRecordingSegment ||
 		recording.MaxDuration != defaultRecordingMaxDuration ||
 		recording.FinalizeTimeout != defaultRecordingFinalize ||
-		recording.KeyframeTimeout != defaultRecordingKeyframeWait ||
 		recording.MinimumFreeBytes != defaultRecordingMinimumFree ||
 		recording.CapacitySafetyFactor != defaultRecordingCapacityFactor {
 		t.Fatalf("recording defaults = %+v", recording)

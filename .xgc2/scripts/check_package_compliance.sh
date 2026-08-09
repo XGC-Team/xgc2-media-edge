@@ -29,13 +29,11 @@ required_files=(
   go.mod
   go.sum
   internal/mediaedge/config.go
+  internal/mediaedge/contracts.go
   internal/mediaedge/http.go
   internal/mediaedge/mediamtx_server.go
   internal/mediaedge/mediamtx_recording.go
-  internal/mediaedge/rtp_continuity.go
-  internal/mediaedge/rtp_continuity_test.go
-  internal/mediaedge/server.go
-  internal/mediaedge/server_test.go
+  internal/mediaedge/recording_contract.go
   internal/mediaedge/source_control.go
   internal/mediamtx/client.go
   internal/mediamtx/config.go
@@ -57,7 +55,7 @@ fi
 go mod verify
 
 if rg -n \
-  'xgc2/core-xgc|(^|/)(ros|gazebo|catkin)(/|$)|github.com/gin-gonic' \
+  'xgc2/core-xgc|(^|/)(ros|gazebo|catkin)(/|$)|github.com/gin-gonic|github.com/pion|legacy-pion' \
   --glob '*.go' --glob 'go.mod' .; then
   echo "media edge contains a forbidden XGC2 Core, ROS, or Gazebo dependency" >&2
   exit 1
@@ -67,8 +65,13 @@ grep -q '^id: xgc2-media-edge$' .xgc2/product.yml
 grep -q '^  distribution: focal,jammy,noble$' .xgc2/product.yml
 grep -q '^  - /usr/bin/xgc-media-edge$' .xgc2/product.yml
 grep -q '^  - /usr/lib/xgc2-media-edge/mediamtx$' .xgc2/product.yml
-grep -q '^  - ffmpeg$' .xgc2/product.yml
-grep -q '^Depends: ca-certificates, ffmpeg$' .xgc2/scripts/build_deb.sh
+grep -q '^Depends: ca-certificates$' .xgc2/scripts/build_deb.sh
+if find internal/mediaedge -maxdepth 1 -type f \
+  \( -name 'server.go' -o -name 'recording.go' -o -name 'recording_muxer.go' \
+     -o -name 'h264_access_unit.go' -o -name 'rtp_continuity.go' \) | grep -q .; then
+  echo "legacy media fanout or muxer source is still present" >&2
+  exit 1
+fi
 grep -q '^version="v1.20.0"$' .xgc2/scripts/fetch_mediamtx.sh
 grep -q '^BSD 3-Clause License$' LICENSE
 

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/lxk36/xgc2-media-edge/internal/mediaedge"
-	"github.com/pion/webrtc/v4"
 )
 
 var version = "dev"
@@ -23,7 +22,6 @@ var version = "dev"
 func main() {
 	var (
 		controlAddress          = flag.String("control-address", "127.0.0.1:18090", "HTTP listen address; explicitly bind a target interface for remote browsers")
-		transport               = flag.String("transport", "mediamtx", "media kernel: mediamtx (default) or legacy-pion (temporary migration comparison only)")
 		mediaMTXExecutable      = flag.String("mediamtx-executable", "/usr/lib/xgc2-media-edge/mediamtx", "absolute path to the pinned MediaMTX binary")
 		mediaMTXRuntimeDir      = flag.String("mediamtx-runtime-dir", "/run/xgc2/media-edge", "absolute private runtime directory for generated MediaMTX configuration")
 		mediaMTXAPIAddress      = flag.String("mediamtx-api-address", "127.0.0.1:19997", "loopback-only MediaMTX control API address")
@@ -47,13 +45,10 @@ func main() {
 		grace                   = flag.Duration("session-grace", 10*time.Second, "idle source stop delay")
 		snapshotTTL             = flag.Duration("snapshot-ttl", 2*time.Minute, "immutable snapshot retention")
 		recordingRoot           = flag.String("recording-root", "", "absolute local recording root; empty disables recording")
-		recordingFFmpeg         = flag.String("recording-ffmpeg", "", "FFmpeg executable used only for H264 stream-copy Matroska muxing")
 		recordingMaxBitrate     = flag.Uint64("recording-max-bitrate", 0, "configured source peak bitrate in bits/s; required with --recording-root")
-		recordingQueue          = flag.Int("recording-queue-packets", 0, "bounded recorder RTP queue; default 8192")
 		recordingSegment        = flag.Duration("recording-segment-duration", 0, "target segment duration; cuts at the next IDR, default 5m")
 		recordingMaxDuration    = flag.Duration("recording-max-duration", 0, "maximum accepted recording duration, default 24h")
-		recordingFinalize       = flag.Duration("recording-finalize-timeout", 0, "per-segment FFmpeg finalize timeout, default 15s")
-		recordingKeyframe       = flag.Duration("recording-keyframe-timeout", 0, "maximum wait for SPS/PPS+IDR, default 8s")
+		recordingFinalize       = flag.Duration("recording-finalize-timeout", 0, "MediaMTX segment finalization timeout, default 15s")
 		recordingMinimumFree    = flag.Uint64("recording-minimum-free-bytes", 0, "filesystem space retained after capacity admission, default 1 GiB")
 		recordingCapacityFactor = flag.Float64("recording-capacity-safety-factor", 0, "peak-bitrate capacity multiplier, default 1.20")
 		printVersion            = flag.Bool("version", false, "print version and exit")
@@ -83,36 +78,25 @@ func main() {
 		SnapshotTTL:        *snapshotTTL,
 		Recording: mediaedge.RecordingConfig{
 			Root:                    *recordingRoot,
-			FFmpegPath:              *recordingFFmpeg,
 			MaxBitrateBitsPerSecond: *recordingMaxBitrate,
-			QueuePackets:            *recordingQueue,
 			SegmentDuration:         *recordingSegment,
 			MaxDuration:             *recordingMaxDuration,
 			FinalizeTimeout:         *recordingFinalize,
-			KeyframeTimeout:         *recordingKeyframe,
 			MinimumFreeBytes:        *recordingMinimumFree,
 			CapacitySafetyFactor:    *recordingCapacityFactor,
 		},
 	}
 	if len(iceURLs) > 0 {
-		config.ICEServers = []webrtc.ICEServer{{
+		config.ICEServers = []mediaedge.ICEServerConfig{{
 			URLs: append([]string(nil), iceURLs...), Username: strings.TrimSpace(*iceUsername), Credential: *iceCredential,
 		}}
 	}
-	var server mediaKernel
-	switch strings.ToLower(strings.TrimSpace(*transport)) {
-	case "mediamtx":
-		server, err = mediaedge.NewMediaMTX(config, mediaedge.MediaMTXSettings{
-			Executable: *mediaMTXExecutable, RuntimeDir: *mediaMTXRuntimeDir,
-			APIAddress: *mediaMTXAPIAddress, WHEPAddress: *mediaMTXWHEPAddress,
-			ICEUDPAddress: *mediaMTXICEUDPAddress, ICETCPAddress: *mediaMTXICETCPAddress,
-			IPsFromInterfaces: *mediaMTXInterfaceIPs,
-		})
-	case "legacy-pion":
-		server, err = mediaedge.New(config)
-	default:
-		log.Fatalf("invalid XGC media-edge transport %q", *transport)
-	}
+	server, err := mediaedge.NewMediaMTX(config, mediaedge.MediaMTXSettings{
+		Executable: *mediaMTXExecutable, RuntimeDir: *mediaMTXRuntimeDir,
+		APIAddress: *mediaMTXAPIAddress, WHEPAddress: *mediaMTXWHEPAddress,
+		ICEUDPAddress: *mediaMTXICEUDPAddress, ICETCPAddress: *mediaMTXICETCPAddress,
+		IPsFromInterfaces: *mediaMTXInterfaceIPs,
+	})
 	if err != nil {
 		log.Fatalf("invalid XGC media-edge configuration: %v", err)
 	}
@@ -127,12 +111,6 @@ func main() {
 	if err := server.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, "stop XGC media edge:", err)
 	}
-}
-
-type mediaKernel interface {
-	Start() error
-	Close() error
-	ControlAddress() string
 }
 
 type multiString []string
