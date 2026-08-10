@@ -100,6 +100,38 @@ func TestMediaMTXCompatibilityHTTPUsesWHEPAndReclaimsAbruptDisconnect(t *testing
 	capture.waitFor(t, 1, activeControlRequest(false))
 }
 
+func TestMediaMTXSourceStatusUsesPathInboundBytes(t *testing.T) {
+	control := newFakeMediaMTXControl("camera")
+	server := newMediaMTXServer(Config{
+		Sources: []SourceConfig{{ID: "camera"}},
+	}, MediaMTXSettings{}, control, newFakeMediaMTXProcess())
+	defer server.Close()
+
+	server.reconcile()
+	first := server.SourceStatuses()
+	server.reconcile()
+	second := server.SourceStatuses()
+	if len(first) != 1 || len(second) != 1 || first[0].BytesReceived == 0 ||
+		second[0].BytesReceived <= first[0].BytesReceived {
+		t.Fatalf("MediaMTX inbound byte status did not advance: first=%+v second=%+v", first, second)
+	}
+
+	payload, err := json.Marshal(second[0])
+	if err != nil {
+		t.Fatalf("encode source status: %v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatalf("decode source status fields: %v", err)
+	}
+	if got := fields["bytesReceived"]; got != float64(second[0].BytesReceived) {
+		t.Fatalf("bytesReceived = %v, want %d", got, second[0].BytesReceived)
+	}
+	if _, found := fields["packetsReceived"]; found {
+		t.Fatalf("source status exposes unsupported MediaMTX packet count: %s", payload)
+	}
+}
+
 func TestMediaMTXRecordingUsesNativeFMP4AndProductManifest(t *testing.T) {
 	capture := newCaptureControl(t)
 	defer capture.close()

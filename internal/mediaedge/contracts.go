@@ -38,21 +38,20 @@ type sourceDescription struct {
 }
 
 // SourceStatus is intentionally metadata-only and never exposes RTP or a frame
-// payload.
+// payload. Counters mirror fields actually reported by the MediaMTX path API.
 type SourceStatus struct {
-	ID              string    `json:"id"`
-	Active          bool      `json:"active"`
-	Available       bool      `json:"available"`
-	Online          bool      `json:"online"`
-	Consumers       int       `json:"consumers"`
-	Viewers         int       `json:"viewers"`
-	RecordingID     string    `json:"recordingId,omitempty"`
-	LastPacketAt    time.Time `json:"lastPacketAt,omitempty"`
-	PacketsReceived uint64    `json:"packetsReceived"`
-	BytesReceived   uint64    `json:"bytesReceived"`
-	FramesInError   uint64    `json:"framesInError"`
-	Width           int       `json:"width"`
-	Height          int       `json:"height"`
-	FPS             float64   `json:"fps"`
-	FrameID         string    `json:"frameId"`
+	ID            string    `json:"id"`
+	Active        bool      `json:"active"`
+	Available     bool      `json:"available"`
+	Online        bool      `json:"online"`
+	Consumers     int       `json:"consumers"`
+	Viewers       int       `json:"viewers"`
+	RecordingID   string    `json:"recordingId,omitempty"`
+	LastPacketAt  time.Time `json:"lastPacketAt,omitempty"`
+	BytesReceived uint64    `json:"bytesReceived"`
+	FramesInError uint64    `json:"framesInError"`
+	Width         int       `json:"width"`
+	Height        int       `json:"height"`
+	FPS           float64   `json:"fps"`
+	FrameID       string    `json:"frameId"`
 }
