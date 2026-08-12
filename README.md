@@ -53,9 +53,9 @@ The remotely reachable HTTP surface is deliberately small:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/`, `/?source={sourceId}`, `/sources/{sourceId}` | Embedded, dependency-free WebRTC player |
-| `GET` | `/assets/player.css` | Embedded player style |
-| `GET` | `/assets/player.js` | Embedded player signaling logic |
+| `GET` | `/`, `/?source={sourceId}`, `/sources/{sourceId}` | Embedded shared-React WebRTC player |
+| `GET` | `/assets/player.css` | Embedded shared XGC2 UI and player style |
+| `GET` | `/assets/player.js` | Embedded React player and signaling logic |
 | `GET` | `/healthz` | Metadata-only health |
 | `POST` | `/api/v1/sources/{sourceId}/sessions` | Non-trickle SDP offer to answer |
 | `DELETE` | `/api/v1/sessions/{sessionId}` | Deterministic session teardown |
@@ -69,9 +69,11 @@ documented below. Live video is never served as HTTP pixels: there is no MJPEG,
 HLS, JPEG polling, discovery, SSE, or WebSocket API.
 
 The embedded page receives only its selected source ID from the server. Its
-plain browser code creates a recv-only `RTCPeerConnection`, waits for local ICE
-gathering, attaches the remote track to `<video>`, and deletes the session when
-the page exits. The default `/` player selects the first configured source;
+React entry consumes the immutable `@xgc2/ui-react` release for the single-title
+topbar, theme control, panel, status text, action control, tokens, responsive
+layout, and global scrollbar contract. Product code creates a recv-only
+`RTCPeerConnection`, waits for local ICE gathering, attaches the remote track to
+`<video>`, and deletes the session when the page exits. The default `/` player selects the first configured source;
 `?source=` and `/sources/` select another source without creating another HTTP
 service.
 
@@ -243,13 +245,19 @@ Relevant tuning flags are:
 
 ## Build and test from source
 
-Go 1.26.2 or newer is required:
+Node.js 22 and Go 1.26.2 or newer are required:
 
 ```bash
+npm --prefix web ci
+npm --prefix web run build
 go test ./...
 go test -race ./...
 ./.xgc2/scripts/build.sh
 ```
+
+The frontend build writes deterministic `player.js` and `player.css` assets
+beside the Go HTML template. Commit those generated files with their React
+source. CI rebuilds them from the immutable shared package and rejects drift.
 
 The development build is written to `.ci/bin/xgc-media-edge`. This source build
 is the intended integration-test input while the interfaces are under active

@@ -21,6 +21,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build shared React player
+        run: |
+          set -euo pipefail
+          npm --prefix web ci
+          npm --prefix web run typecheck
+          npm --prefix web run build
+          git diff --exit-code -- \
+            internal/mediaedge/player/player.css \
+            internal/mediaedge/player/player.js
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:

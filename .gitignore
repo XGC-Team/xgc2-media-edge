@@ -3,4 +3,7 @@
 /build/
 /debs/
 /dist/
+/web/node_modules/
+/web/dist/
+/web/*.tsbuildinfo
 coverage.out

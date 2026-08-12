@@ -170,17 +170,26 @@ func TestRemoteHTTPPublishesOnlyPlayerHealthAndSessions(t *testing.T) {
 		t.Fatalf("GET / content type = %q", contentType)
 	}
 	if body := root.Body.String(); !strings.Contains(body, `data-source-id="camera"`) ||
-		!strings.Contains(body, "/assets/player.js") {
+		!strings.Contains(body, `type="module"`) ||
+		!strings.Contains(body, "/assets/player.js") ||
+		!strings.Contains(body, "XGC2 Media Edge") {
 		t.Fatalf("GET / did not render the configured player: %s", body)
 	}
 
 	script := performHTTPRequest(handler, http.MethodGet, "/assets/player.js", "", "192.0.2.44:42000", nil)
 	if script.Code != http.StatusOK ||
 		script.Header().Get("Cache-Control") != "no-store" ||
-		!strings.Contains(script.Body.String(), "new RTCPeerConnection()") ||
-		!strings.Contains(script.Body.String(), `direction: "recvonly"`) ||
-		!strings.Contains(script.Body.String(), `method: "DELETE"`) {
+		!strings.Contains(script.Body.String(), "RTCPeerConnection") ||
+		!strings.Contains(script.Body.String(), "recvonly") ||
+		!strings.Contains(script.Body.String(), "DELETE") ||
+		!strings.Contains(script.Body.String(), "xgc-app-shell") {
 		t.Fatalf("embedded player script is incomplete: %d %s", script.Code, script.Body.String())
+	}
+	style := performHTTPRequest(handler, http.MethodGet, "/assets/player.css", "", "192.0.2.44:42000", nil)
+	if style.Code != http.StatusOK ||
+		!strings.Contains(style.Body.String(), ".xgc-topbar") ||
+		!strings.Contains(style.Body.String(), ".media-player-page") {
+		t.Fatalf("embedded shared player style is incomplete: %d", style.Code)
 	}
 
 	health := performHTTPRequest(handler, http.MethodGet, "/healthz", "", "192.0.2.44:42000", nil)
