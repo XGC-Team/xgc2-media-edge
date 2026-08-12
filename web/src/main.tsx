@@ -65,7 +65,19 @@ function App() {
 
     const connection = new RTCPeerConnection()
     peerRef.current = connection
-    connection.addTransceiver('video', { direction: 'recvonly' })
+    const transceiver = connection.addTransceiver('video', { direction: 'recvonly' })
+    // This player is for direct edge preview, not buffered playback. Keep the
+    // browser's adaptive jitter target at its minimum when the API is present.
+    try {
+      if ('playoutDelayHint' in transceiver.receiver) {
+        transceiver.receiver.playoutDelayHint = 0
+      }
+      if ('jitterBufferTarget' in transceiver.receiver) {
+        transceiver.receiver.jitterBufferTarget = 0
+      }
+    } catch {
+      // Older browsers expose one of these properties as read-only.
+    }
     connection.addEventListener('track', (event) => {
       if (currentGeneration !== generationRef.current || !videoRef.current) return
       videoRef.current.srcObject = event.streams[0] || new MediaStream([event.track])
