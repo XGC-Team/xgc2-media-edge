@@ -8,12 +8,20 @@ import {
   SegmentedControl,
   StatusText,
   Topbar,
+  initializeSkin,
+  useSkin,
 } from '@xgc2/ui-react'
 import '@xgc2/ui-react/styles.css'
 import './styles.css'
 
-type Skin = 'light' | 'dark'
 type SessionState = 'starting' | 'connected' | 'error'
+
+const skinOptions = {
+  defaultSkin: 'dark',
+  storageKey: 'xgc2-media-edge.skin',
+} as const
+
+initializeSkin(skinOptions)
 
 type SessionAnswer = {
   error?: string
@@ -27,16 +35,11 @@ function App() {
   const peerRef = useRef<RTCPeerConnection | null>(null)
   const sessionIdRef = useRef('')
   const generationRef = useRef(0)
-  const [skin, setSkin] = useState<Skin>(readSkin)
+  const [skin, setSkin] = useSkin(skinOptions)
   const [sessionState, setSessionState] = useState<SessionState>('starting')
   const [stateLabel, setStateLabel] = useState('Connecting')
   const [message, setMessage] = useState('Negotiating a direct WebRTC session…')
   const [connecting, setConnecting] = useState(true)
-
-  useEffect(() => {
-    document.documentElement.dataset.skin = skin
-    try { localStorage.setItem('xgc2-media-edge.skin', skin) } catch { /* storage can be unavailable */ }
-  }, [skin])
 
   const closeSession = useCallback(() => {
     generationRef.current += 1
@@ -155,7 +158,7 @@ function App() {
               ariaLabel="Appearance"
               value={skin}
               options={[{ label: 'Light', value: 'light' }, { label: 'Dark', value: 'dark' }]}
-              onValueChange={(value) => setSkin(value as Skin)}
+              onValueChange={(value) => setSkin(value as typeof skin)}
             />
           )}
         />
@@ -206,10 +209,6 @@ function waitForICEGathering(connection: RTCPeerConnection): Promise<void> {
     }
     connection.addEventListener('icegatheringstatechange', changed)
   })
-}
-
-function readSkin(): Skin {
-  try { return localStorage.getItem('xgc2-media-edge.skin') === 'light' ? 'light' : 'dark' } catch { return 'dark' }
 }
 
 const root = document.getElementById('app')
