@@ -22,6 +22,7 @@ required_files=(
   .xgc2/scripts/check_manifest_contract.py
   .xgc2/scripts/check_package_compliance.sh
   .xgc2/scripts/smoke_test_installed.sh
+  .xgc2/scripts/verify_unprivileged_mediamtx.sh
   .xgc2/scripts/xgc2_artifact_manifest.py
   LICENSE
   README.md

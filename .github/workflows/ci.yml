@@ -158,6 +158,14 @@ jobs:
               ./.xgc2/scripts/smoke_test_installed.sh
             '
 
+      - name: Prove MediaMTX readiness without container privileges
+        run: |
+          set -euo pipefail
+          ./.xgc2/scripts/verify_unprivileged_mediamtx.sh \
+            debs/xgc2-media-edge_*_${{ matrix.architecture }}.deb \
+            "${{ matrix.image }}" \
+            "${{ matrix.platform }}"
+
       - name: Create trusted build manifest
         run: |
           set -euo pipefail

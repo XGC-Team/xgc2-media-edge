@@ -21,10 +21,11 @@ const (
 	LinuxAMD64SHA256 = "952d5f7d31d1b448ab4da4509550594c511d42636db9d7bb175d377f4ede81df"
 	LinuxARM64SHA256 = "6aa3c03da7b6477f1e110c8e18e819cf9ef121e8981b52b8f8219982dae35f2f"
 
-	// A 4K H264 IDR can exceed the Linux default UDP receive buffer in one
-	// burst. MediaMTX must absorb the complete FU-A sequence or the browser
-	// receives an undecodable frame and stalls until a later IDR.
-	udpReadBufferSize = 4 * 1024 * 1024
+	// Zero is MediaMTX's explicit operating-system-default contract. A non-zero
+	// value is capped by the host's receive-buffer policy and can make startup
+	// require a host sysctl or extra container privileges. Buffer capacity is a
+	// deployment acceptance concern, not a runtime fallback owned by Edge.
+	udpReadBufferSize = 0
 )
 
 var pathName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)

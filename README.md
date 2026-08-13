@@ -47,6 +47,22 @@ owner of process definitions, readiness probes, resource declarations, and
 restart policy when it is used, but supervision is optional and never enters
 the connection path.
 
+### UDP receive-buffer contract
+
+The generated MediaMTX configuration always contains
+`udpReadBufferSize: 0`. In MediaMTX this means the operating-system default.
+Edge does not expose another buffer setting, inspect the host limit, retry with
+a different value, alter a `sysctl`, or require container privileges. This is
+one portable startup contract; whether a target's ordinary socket capacity is
+enough for its peak stream remains a deployment acceptance result.
+
+Every Debian package matrix entry proves this contract with the real bundled
+MediaMTX binary. The automated probe extracts that binary, runs it as numeric
+UID/GID 65532 with all Linux capabilities dropped, no external network, a
+read-only root filesystem, and `no-new-privileges`, then waits for the actual
+MediaMTX API to report the configured RTP path. No mock process or readiness
+response is used.
+
 ## Browser surface
 
 The remotely reachable HTTP surface is deliberately small:
@@ -262,6 +278,38 @@ source. CI rebuilds them from the immutable shared package and rejects drift.
 The development build is written to `.ci/bin/xgc-media-edge`. This source build
 is the intended integration-test input while the interfaces are under active
 development; Debian packages are the production artifact.
+
+### Real 4K RTP burst acceptance
+
+The non-privileged startup probe is deliberately not presented as a throughput
+test. A target profile is accepted for 4K only with a real H264 encoder and RTP
+packetizer feeding the packaged MediaMTX process under the same container,
+kernel, CPU, and network limits used in deployment. A physical source adapter
+is preferred. A GStreamer `videotestsrc` is acceptable only when its pixels pass
+through the real 3840x2160 encoder and `rtph264pay`; generated UDP bytes, mocked
+MediaMTX APIs, and injected counters are not evidence.
+
+The repeatable profile is 3840x2160 at 30 frames/s, payload type 96, 90 kHz RTP,
+MTU 1200, the deployment's declared peak bitrate, and one IDR per second for at
+least ten minutes. Source-side instrumentation must retain sent RTP packet and
+byte counts plus the largest one-, ten-, and one-hundred-millisecond bursts.
+During the same run one real WHEP receiver must decode continuously and native
+MediaMTX recording must be enabled. Acceptance requires all of the following:
+
+- MediaMTX reports an H264 3840x2160 track, increasing inbound bytes, and zero
+  `inboundFramesInError` from start through final IDR;
+- receiver WebRTC statistics show decoded frames and keyframes advancing with
+  no RTP packet loss or decode freeze across every measured burst;
+- `ffprobe` identifies the finalized recording as H264 3840x2160 with the
+  expected duration, and a full decode reports no corrupt frame;
+- logs contain no UDP read, RTP sequence, reader-too-slow, or frame decode
+  error, and rerunning the profile three times produces the same result;
+- the receipt records package digest, MediaMTX version, kernel/container limits,
+  encoder settings, sender burst measurements, API snapshots, receiver stats,
+  and recording digest.
+
+A failure rejects that deployment profile. It does not cause Edge to select a
+larger buffer dynamically or add a privileged execution path.
 
 ## Run
 
