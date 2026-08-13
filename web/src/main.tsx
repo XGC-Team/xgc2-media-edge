@@ -164,6 +164,8 @@ function App() {
       <main className="media-player-page">
         <Panel
           className="media-player-panel"
+          bodyLayout="column"
+          fill
           padding="none"
           title={sourceId}
           actions={(
@@ -180,7 +182,7 @@ function App() {
             {message ? <p className="media-message" role={sessionState === 'error' ? 'alert' : 'status'}>{message}</p> : null}
           </section>
           <footer className="media-player-footer">
-            <Button onClick={() => void connect()} disabled={connecting}>Reconnect</Button>
+            <Button className="media-player-reconnect" onClick={() => void connect()} disabled={connecting}>Reconnect</Button>
             <span>H.264 · WebRTC · direct to this edge</span>
           </footer>
         </Panel>
