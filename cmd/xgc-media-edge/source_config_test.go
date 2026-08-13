@@ -7,17 +7,10 @@ import (
 	"testing"
 )
 
-func TestResolveSourcesKeepsLegacySingleSourceFlags(t *testing.T) {
-	sources, err := resolveSources("", legacySourceFlags{
-		ID: "front", RTPListenAddress: "127.0.0.1:5004",
-		ControlSocket: "/tmp/front.sock", Width: 1280, Height: 720,
-		FPS: 30, FrameID: "front_optical",
-	})
-	if err != nil {
-		t.Fatalf("resolve legacy source: %v", err)
-	}
-	if len(sources) != 1 || sources[0].ID != "front" || sources[0].FPS != 30 {
-		t.Fatalf("legacy source = %+v", sources)
+func TestResolveSourcesRequiresConfigPath(t *testing.T) {
+	if _, err := resolveSources(" \t\n"); err == nil ||
+		!strings.Contains(err.Error(), "--sources-config is required") {
+		t.Fatalf("required config error = %v", err)
 	}
 }
 
@@ -31,7 +24,7 @@ func TestLoadSourcesAcceptsMultipleStrictSourceEntries(t *testing.T) {
 		t.Fatalf("write sources config: %v", err)
 	}
 
-	sources, err := resolveSources(path, legacySourceFlags{})
+	sources, err := resolveSources(path)
 	if err != nil {
 		t.Fatalf("resolve sources config: %v", err)
 	}
@@ -43,18 +36,32 @@ func TestLoadSourcesAcceptsMultipleStrictSourceEntries(t *testing.T) {
 	}
 }
 
-func TestSourcesConfigRejectsAmbiguousOrUnknownConfiguration(t *testing.T) {
+func TestSourcesConfigRejectsUnknownConfiguration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sources.json")
 	if err := os.WriteFile(path, []byte(`{"sources":[{"id":"front","unknown":true}]}`), 0o600); err != nil {
 		t.Fatalf("write sources config: %v", err)
 	}
-	if _, err := resolveSources(path, legacySourceFlags{}); err == nil ||
+	if _, err := resolveSources(path); err == nil ||
 		!strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("unknown field error = %v", err)
 	}
-	if _, err := resolveSources(path, legacySourceFlags{ID: "front"}); err == nil ||
-		!strings.Contains(err.Error(), "cannot be combined") {
-		t.Fatalf("mixed source configuration error = %v", err)
+}
+
+func TestSourcesConfigRejectsEmptyRosterAndTrailingDocument(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sources.json")
+	if err := os.WriteFile(path, []byte(`{"sources":[]}`), 0o600); err != nil {
+		t.Fatalf("write empty sources config: %v", err)
+	}
+	if _, err := resolveSources(path); err == nil ||
+		!strings.Contains(err.Error(), "at least one source") {
+		t.Fatalf("empty roster error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"sources":[{"id":"front"}]} {}`), 0o600); err != nil {
+		t.Fatalf("write trailing sources config: %v", err)
+	}
+	if _, err := resolveSources(path); err == nil ||
+		!strings.Contains(err.Error(), "exactly one JSON document") {
+		t.Fatalf("trailing document error = %v", err)
 	}
 }
 

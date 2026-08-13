@@ -29,14 +29,7 @@ func main() {
 		mediaMTXICEUDPAddress   = flag.String("webrtc-ice-udp-address", "0.0.0.0:18189", "MediaMTX fixed WebRTC ICE UDP listener")
 		mediaMTXICETCPAddress   = flag.String("webrtc-ice-tcp-address", "", "optional MediaMTX fixed WebRTC ICE TCP listener")
 		mediaMTXInterfaceIPs    = flag.Bool("webrtc-interface-ips", true, "advertise target interface IPs as ICE candidates")
-		sourcesConfig           = flag.String("sources-config", "", "JSON file containing one or more local media sources; mutually exclusive with legacy single-source flags")
-		sourceID                = flag.String("source-id", "", "stable media source ID")
-		rtpAddress              = flag.String("rtp-listen-address", "", "loopback H264/RTP ingress address")
-		controlSocket           = flag.String("source-control-socket", "", "absolute Unix socket owned by the capture source")
-		width                   = flag.Int("width", 0, "optional expected source pixel width; provide all four metadata assertions or none")
-		height                  = flag.Int("height", 0, "optional expected source pixel height; provide all four metadata assertions or none")
-		fps                     = flag.Float64("fps", 0, "optional expected source frame rate; provide all four metadata assertions or none")
-		frameID                 = flag.String("frame-id", "", "optional expected source optical frame ID; provide all four metadata assertions or none")
+		sourcesConfig           = flag.String("sources-config", "", "required JSON file containing one or more local media sources")
 		allowedOrigins          multiString
 		publicIPs               multiString
 		iceURLs                 multiString
@@ -62,10 +55,7 @@ func main() {
 		return
 	}
 
-	sources, err := resolveSources(*sourcesConfig, legacySourceFlags{
-		ID: *sourceID, RTPListenAddress: *rtpAddress, ControlSocket: *controlSocket,
-		Width: *width, Height: *height, FPS: *fps, FrameID: *frameID,
-	})
+	sources, err := resolveSources(*sourcesConfig)
 	if err != nil {
 		log.Fatalf("invalid XGC media-edge source configuration: %v", err)
 	}

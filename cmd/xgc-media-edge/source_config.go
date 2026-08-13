@@ -18,37 +18,12 @@ type sourcesDocument struct {
 	Sources []mediaedge.SourceConfig `json:"sources"`
 }
 
-type legacySourceFlags struct {
-	ID               string
-	RTPListenAddress string
-	ControlSocket    string
-	Width            int
-	Height           int
-	FPS              float64
-	FrameID          string
-}
-
-func resolveSources(path string, legacy legacySourceFlags) ([]mediaedge.SourceConfig, error) {
+func resolveSources(path string) ([]mediaedge.SourceConfig, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return []mediaedge.SourceConfig{{
-			ID: legacy.ID, RTPListenAddress: legacy.RTPListenAddress,
-			ControlSocket: legacy.ControlSocket, Width: legacy.Width,
-			Height: legacy.Height, FPS: legacy.FPS, FrameID: legacy.FrameID,
-		}}, nil
-	}
-	if legacy.configured() {
-		return nil, errors.New("--sources-config cannot be combined with single-source flags")
+		return nil, errors.New("--sources-config is required")
 	}
 	return loadSources(path)
-}
-
-func (legacy legacySourceFlags) configured() bool {
-	return strings.TrimSpace(legacy.ID) != "" ||
-		strings.TrimSpace(legacy.RTPListenAddress) != "" ||
-		strings.TrimSpace(legacy.ControlSocket) != "" ||
-		legacy.Width != 0 || legacy.Height != 0 || legacy.FPS != 0 ||
-		strings.TrimSpace(legacy.FrameID) != ""
 }
 
 func loadSources(path string) ([]mediaedge.SourceConfig, error) {

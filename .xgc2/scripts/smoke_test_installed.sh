@@ -17,12 +17,11 @@ esac
 help="$(xgc-media-edge --help 2>&1)"
 grep -q -- '-control-address' <<<"${help}"
 grep -q -- '127.0.0.1:18090' <<<"${help}"
-grep -q -- '-rtp-listen-address' <<<"${help}"
-grep -q -- '-source-control-socket' <<<"${help}"
+grep -q -- '-sources-config' <<<"${help}"
 grep -q -- '-mediamtx-executable' <<<"${help}"
 grep -q -- '0.0.0.0:18189' <<<"${help}"
-if grep -q -- '-transport\|legacy-pion\|recording-ffmpeg' <<<"${help}"; then
-  echo "installed binary still exposes a retired media implementation" >&2
+if grep -Eq -- '-source-id|-rtp-listen-address|-source-control-socket|-width|-height|-fps|-frame-id|-transport|legacy-pion|recording-ffmpeg' <<<"${help}"; then
+  echo "installed binary still exposes a retired source or media interface" >&2
   exit 1
 fi
 test "$(/usr/lib/xgc2-media-edge/mediamtx --version)" = "v1.20.0"

@@ -265,22 +265,8 @@ development; Debian packages are the production artifact.
 
 ## Run
 
-Example for a co-located source that already implements the contract above:
-
-```bash
-./.ci/bin/xgc-media-edge \
-  --control-address 0.0.0.0:18090 \
-  --allowed-origin http://192.168.1.20:3000 \
-  --source-id camera \
-  --rtp-listen-address 127.0.0.1:5004 \
-  --source-control-socket /tmp/xgc2/media/camera.sock \
-  --recording-root /var/lib/xgc2/media-recordings \
-  --recording-max-bitrate 13500000
-```
-
-The flags above remain the shortest single-source form. For multiple
-independently controlled sources, use one strict JSON document and omit every
-single-source flag. A ready-to-copy two-source document is checked in at
+Every source roster, including a single-source deployment, is one strict JSON
+document. A ready-to-copy two-source document is checked in at
 `examples/two-sources.json`:
 
 ```json
@@ -307,6 +293,9 @@ single-source flag. A ready-to-copy two-source document is checked in at
 ```bash
 ./.ci/bin/xgc-media-edge \
   --control-address 0.0.0.0:18090 \
+  --allowed-origin http://192.168.1.20:3000 \
+  --recording-root /var/lib/xgc2/media-recordings \
+  --recording-max-bitrate 13500000 \
   --sources-config /run/xgc2/media/sources.json
 ```
 
