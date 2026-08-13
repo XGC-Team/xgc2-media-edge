@@ -12,6 +12,24 @@ python3 -m py_compile \
   .xgc2/scripts/xgc2_artifact_manifest.py
 python3 .xgc2/scripts/check_manifest_contract.py
 
+if rg -n \
+  'xgc2\.build-artifact\.v1|run_cpp_quality|run_source_tests|actions/(checkout|setup-node|setup-go|upload-artifact)@v[0-9]' \
+  .github/workflows .xgc2/scripts/xgc2_artifact_manifest.py; then
+  echo "release contract contains a legacy schema, optional quality gate, or floating action" >&2
+  exit 1
+fi
+grep -q 'xgc2.build-artifact.v2' .xgc2/scripts/xgc2_artifact_manifest.py
+grep -q -- '--prepare-action ci' .github/workflows/ci.yml
+grep -q -- '--dependency-mode locked-source' .github/workflows/ci.yml
+grep -q -- '--prepare-action "${{ inputs.prepare_action }}"' \
+  .github/workflows/release.yml
+grep -q -- '--dependency-mode locked-source' .github/workflows/release.yml
+if [[ "$(rg -c 'verify-build' .github/workflows/ci.yml)" -ne 1 ||
+      "$(rg -c 'verify-build' .github/workflows/release.yml)" -ne 1 ]]; then
+  echo "CI and release must verify each build manifest before upload" >&2
+  exit 1
+fi
+
 required_files=(
   .github/workflows/ci.yml
   .github/workflows/release.yml

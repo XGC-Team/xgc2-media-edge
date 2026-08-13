@@ -7,8 +7,8 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import re
 import tempfile
-from datetime import datetime
 from pathlib import Path
 
 
@@ -21,8 +21,11 @@ TOP_LEVEL_KEYS = {
     "version",
     "distribution",
     "architecture",
+    "prepareAction",
+    "dependencySetDigest",
+    "dependencyMode",
+    "dependencies",
     "ci",
-    "created_at",
     "debs",
 }
 DEB_KEYS = {"file", "package", "version", "architecture", "sha256", "size"}
@@ -67,15 +70,29 @@ def main() -> int:
                 ci_workflow_ref=(
                     "lxk36/xgc2-media-edge/.github/workflows/ci.yml@refs/heads/main"
                 ),
+                prepare_action="ci",
+                dependency_set_digest=module.EMPTY_DEPENDENCY_SET_DIGEST,
+                dependency_mode="locked-source",
             )
         )
         manifest = json.loads(destination.read_text(encoding="utf-8"))
 
         require(set(manifest) == TOP_LEVEL_KEYS, "unexpected manifest fields")
         require(
-            manifest["schema"] == "xgc2.build-artifact.v1",
+            manifest["schema"] == "xgc2.build-artifact.v2",
             "build manifest schema regressed",
         )
+        require(manifest["prepareAction"] == "ci", "prepareAction is invalid")
+        require(
+            manifest["dependencySetDigest"]
+            == module.EMPTY_DEPENDENCY_SET_DIGEST,
+            "empty dependency digest is invalid",
+        )
+        require(
+            manifest["dependencyMode"] == "locked-source",
+            "dependency mode is invalid",
+        )
+        require(manifest["dependencies"] == [], "leaf dependencies must be empty")
         require(manifest["version"] == "0.2.0-1", "version field is invalid")
         require(
             isinstance(manifest["debs"], list) and len(manifest["debs"]) == 1,
@@ -96,8 +113,81 @@ def main() -> int:
         )
         require(entry["size"] == deb.stat().st_size, "deb size is invalid")
         require(manifest["ci"]["run_id"] == "12345", "CI identity is invalid")
-        require(manifest["created_at"].endswith("Z"), "created_at must use UTC")
-        datetime.fromisoformat(manifest["created_at"].replace("Z", "+00:00"))
+
+        verified_debs = root / "verified-debs"
+        verified_manifests = root / "verified-manifests"
+        module.verify_manifest(
+            argparse.Namespace(
+                artifact_dir=str(root),
+                deb_output_dir=str(verified_debs),
+                manifest_output_dir=str(verified_manifests),
+                product="xgc2-media-edge",
+                product_version="0.2.0-1",
+                distribution="focal",
+                architecture="amd64",
+                source_sha="a" * 40,
+                ci_run_id="12345",
+                prepare_action="ci",
+                dependency_set_digest=module.EMPTY_DEPENDENCY_SET_DIGEST,
+                dependency_mode="locked-source",
+            )
+        )
+        require((verified_debs / deb.name).is_file(), "verified deb was not copied")
+        require(
+            (verified_manifests / destination.name).is_file(),
+            "verified manifest was not copied",
+        )
+
+        for invalid in ("", "0" * 64):
+            try:
+                module.validate_contract(
+                    prepare_action="ci",
+                    dependency_set_digest=invalid,
+                    dependency_mode="locked-source",
+                )
+            except ValueError:
+                pass
+            else:
+                raise SystemExit("non-canonical dependency digest was accepted")
+        try:
+            module.validate_contract(
+                prepare_action="ci",
+                dependency_set_digest=module.EMPTY_DEPENDENCY_SET_DIGEST,
+                dependency_mode="staging-apt",
+            )
+        except ValueError:
+            pass
+        else:
+            raise SystemExit("dependency-free product accepted staging-apt mode")
+
+    workflows = {
+        name: (SCRIPT_DIR.parent.parent / ".github" / "workflows" / name).read_text(
+            encoding="utf-8"
+        )
+        for name in ("ci.yml", "release.yml")
+    }
+    for name, workflow in workflows.items():
+        require("verify-build" in workflow, f"{name} does not verify its manifest")
+        for action in re.findall(r"uses:\s+actions/[^@\s]+@([^\s#]+)", workflow):
+            require(
+                re.fullmatch(r"[0-9a-f]{40}", action) is not None,
+                f"{name} contains a floating GitHub Action",
+            )
+    release = workflows["release.yml"]
+    require("run_cpp_quality" not in release, "optional C++ quality gate returned")
+    require("run_source_tests" not in release, "optional source gate returned")
+    require(
+        "if: ${{ inputs.prepare_action == 'release' }}" not in release,
+        "compatibility artifacts are not uploaded",
+    )
+    require(
+        re.search(r"(?m)^  source-tests:\n(?!\s+if:)", release) is not None,
+        "release source quality may be skipped",
+    )
+    require(
+        re.search(r"(?m)^  package-compliance:\n(?!\s+if:)", release) is not None,
+        "release package quality may be skipped",
+    )
 
     print("Build artifact manifest contract checks passed.")
     return 0

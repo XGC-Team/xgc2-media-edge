@@ -13,8 +13,7 @@ on:
         type: string
       prepare_action:
         description: Release-train action
-        required: false
-        default: release
+        required: true
         type: choice
         options: [release, compatibility-verify]
       apt_overlay_url:
@@ -24,23 +23,16 @@ on:
         type: string
       dependency_set_digest:
         description: SHA256 of the resolved release-train dependency set
-        required: false
-        default: ""
+        required: true
         type: string
-      run_cpp_quality:
-        description: Compatibility input; this product has no C++ source
-        required: true
-        default: false
-        type: boolean
-      run_source_tests:
-        description: Run Go source tests and race detector
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   actions: read
   contents: read
+
+defaults:
+  run:
+    shell: bash
 
 env:
   XGC2_APT_OVERLAY_URL: ${{ inputs.apt_overlay_url }}
@@ -65,13 +57,13 @@ jobs:
               exit 1
               ;;
           esac
-          if [[ -n "${DEPENDENCY_SET_DIGEST}" &&
-                ! "${DEPENDENCY_SET_DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "dependency_set_digest must be empty or 64 lowercase hex characters" >&2
+          if [[ "${DEPENDENCY_SET_DIGEST}" != \
+                "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" ]]; then
+            echo "dependency_set_digest must identify the empty dependency set" >&2
             exit 1
           fi
-          if [[ -n "${APT_OVERLAY_URL}" && -z "${DEPENDENCY_SET_DIGEST}" ]]; then
-            echo "apt_overlay_url requires a dependency_set_digest" >&2
+          if [[ -n "${APT_OVERLAY_URL}" ]]; then
+            echo "Media Edge has no APT dependencies and forbids apt_overlay_url" >&2
             exit 1
           fi
 
@@ -84,7 +76,7 @@ jobs:
         shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Validate version and source
         run: |
@@ -102,10 +94,10 @@ jobs:
         shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -122,7 +114,7 @@ jobs:
             internal/mediaedge/player/player.js
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -133,16 +125,7 @@ jobs:
           git diff --check HEAD
           ./.xgc2/scripts/check_package_compliance.sh
 
-  cpp-quality:
-    if: ${{ inputs.run_cpp_quality }}
-    needs: release-guard
-    runs-on: ubuntu-latest
-    steps:
-      - name: Confirm C++ gate is not applicable
-        run: echo "xgc2-media-edge contains no C++ source."
-
   source-tests:
-    if: ${{ inputs.run_source_tests }}
     needs: release-guard
     runs-on: ubuntu-latest
     defaults:
@@ -150,10 +133,10 @@ jobs:
         shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -210,10 +193,10 @@ jobs:
         shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -272,11 +255,26 @@ jobs:
             --source-sha "${{ inputs.expected_source_sha }}" \
             --ci-run-id "${GITHUB_RUN_ID}" \
             --ci-workflow "${GITHUB_WORKFLOW}" \
-            --ci-workflow-ref "${GITHUB_WORKFLOW_REF}"
+            --ci-workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --prepare-action "${{ inputs.prepare_action }}" \
+            --dependency-set-digest "${{ inputs.dependency_set_digest }}" \
+            --dependency-mode locked-source
+          python3 .xgc2/scripts/xgc2_artifact_manifest.py verify-build \
+            --artifact-dir . \
+            --deb-output-dir .ci/verified-debs \
+            --manifest-output-dir .ci/verified-manifests \
+            --product xgc2-media-edge \
+            --product-version "${{ inputs.expected_version }}" \
+            --distribution "${{ matrix.distribution }}" \
+            --architecture "${{ matrix.architecture }}" \
+            --source-sha "${{ inputs.expected_source_sha }}" \
+            --ci-run-id "${GITHUB_RUN_ID}" \
+            --prepare-action "${{ inputs.prepare_action }}" \
+            --dependency-set-digest "${{ inputs.dependency_set_digest }}" \
+            --dependency-mode locked-source
 
       - name: Upload trusted deb artifact
-        if: ${{ inputs.prepare_action == 'release' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: xgc2-media-edge-${{ matrix.distribution }}-${{ matrix.architecture }}
           path: |
