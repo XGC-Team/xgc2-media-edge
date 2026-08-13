@@ -12,7 +12,7 @@ python3 -m py_compile \
   .xgc2/scripts/xgc2_artifact_manifest.py
 python3 .xgc2/scripts/check_manifest_contract.py
 
-if rg -n \
+if grep -ERn \
   'xgc2\.build-artifact\.v1|run_cpp_quality|run_source_tests|actions/(checkout|setup-node|setup-go|upload-artifact)@v[0-9]' \
   .github/workflows .xgc2/scripts/xgc2_artifact_manifest.py; then
   echo "release contract contains a legacy schema, optional quality gate, or floating action" >&2
@@ -24,8 +24,8 @@ grep -q -- '--dependency-mode locked-source' .github/workflows/ci.yml
 grep -q -- '--prepare-action "${{ inputs.prepare_action }}"' \
   .github/workflows/release.yml
 grep -q -- '--dependency-mode locked-source' .github/workflows/release.yml
-if [[ "$(rg -c 'verify-build' .github/workflows/ci.yml)" -ne 1 ||
-      "$(rg -c 'verify-build' .github/workflows/release.yml)" -ne 1 ]]; then
+if [[ "$(grep -c 'verify-build' .github/workflows/ci.yml)" -ne 1 ||
+      "$(grep -c 'verify-build' .github/workflows/release.yml)" -ne 1 ]]; then
   echo "CI and release must verify each build manifest before upload" >&2
   exit 1
 fi
@@ -73,9 +73,9 @@ if [[ -n "${unformatted}" ]]; then
 fi
 go mod verify
 
-if rg -n \
-  'xgc2/core-xgc|(^|/)(ros|gazebo|catkin)(/|$)|github.com/gin-gonic|github.com/pion|legacy-pion' \
-  --glob '*.go' --glob 'go.mod' .; then
+if find . -type f \( -name '*.go' -o -name go.mod \) -print0 |
+  xargs -0 grep -En \
+    'xgc2/core-xgc|(^|/)(ros|gazebo|catkin)(/|$)|github.com/gin-gonic|github.com/pion|legacy-pion'; then
   echo "media edge contains a forbidden XGC2 Core, ROS, or Gazebo dependency" >&2
   exit 1
 fi
