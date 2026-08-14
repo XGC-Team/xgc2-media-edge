@@ -32,6 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           npm --prefix web ci
+          npm --prefix web run check:ui-policy
           npm --prefix web run typecheck
           npm --prefix web run build
           git diff --exit-code -- \
