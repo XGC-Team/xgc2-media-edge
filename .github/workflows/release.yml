@@ -96,34 +96,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Verify shared React player
-        run: |
-          set -euo pipefail
-          npm --prefix web ci
-          npm --prefix web run typecheck
-          npm --prefix web run build
-          git diff --exit-code -- \
-            internal/mediaedge/player/player.css \
-            internal/mediaedge/player/player.js
-
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-
-      - name: Check package contract
+      - name: Check package contract in the XGC2 noble image
         run: |
           set -euo pipefail
           git diff --check HEAD
-          ./.xgc2/scripts/check_package_compliance.sh
+          image=ghcr.io/xgc-team/xgc2-images/xgc2-build-noble-dev:1.0.0
+          docker pull "${image}"
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/work" -w /work \
+            "${image}" \
+            bash -lc '
+              set -euo pipefail
+              git config --global --add safe.directory /work
+              npm --prefix web ci
+              npm --prefix web run typecheck
+              npm --prefix web run build
+              git diff --exit-code -- \
+                internal/mediaedge/player/player.css \
+                internal/mediaedge/player/player.js
+              ./.xgc2/scripts/check_package_compliance.sh
+            '
 
   source-tests:
     needs: release-guard
@@ -135,20 +127,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-
-      - name: Run Go quality gates
+      - name: Run Go quality gates in the XGC2 noble image
         run: |
           set -euo pipefail
-          test -z "$(gofmt -l cmd internal)"
-          go vet ./...
-          go test ./...
-          go test -race ./...
-          ./.xgc2/scripts/build.sh
+          image=ghcr.io/xgc-team/xgc2-images/xgc2-build-noble-dev:1.0.0
+          docker pull "${image}"
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/work" -w /work \
+            "${image}" \
+            bash -lc '
+              set -euo pipefail
+              git config --global --add safe.directory /work
+              test -z "$(gofmt -l cmd internal)"
+              go vet ./...
+              go test ./...
+              go test -race ./...
+              ./.xgc2/scripts/build.sh
+            '
 
   deb-build-and-smoke:
     name: Debian ${{ matrix.distribution }} ${{ matrix.architecture }}
@@ -195,41 +190,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-
-      - name: Install package tools
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            curl dpkg-dev fakeroot file
-
-      - name: Build deb
+      - name: Build deb and smoke-test in the XGC2 image
         env:
           PACKAGE_DISTRIBUTION: ${{ matrix.distribution }}
         run: |
           set -euo pipefail
           test "$(dpkg --print-architecture)" = "${{ matrix.architecture }}"
-          ./.xgc2/scripts/build_deb.sh
-
-      - name: Runtime-smoke package in its Ubuntu release
-        run: |
-          set -euo pipefail
+          docker pull "${{ matrix.image }}"
           docker run --rm \
             --platform "${{ matrix.platform }}" \
+            -e PACKAGE_DISTRIBUTION \
             -v "${GITHUB_WORKSPACE}:/work" \
             -w /work \
             "${{ matrix.image }}" \
             bash -lc '
               set -euo pipefail
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              apt-get install -y --no-install-recommends ca-certificates file
-              apt-get install -y ./debs/xgc2-media-edge_*.deb
+              for pkg in curl dpkg-dev fakeroot file ca-certificates; do
+                dpkg -s "${pkg}" >/dev/null
+              done
+              ./.xgc2/scripts/build_deb.sh
+              dpkg -i ./debs/xgc2-media-edge_*.deb
               ./.xgc2/scripts/smoke_test_installed.sh
             '
 
