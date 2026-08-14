@@ -159,32 +159,32 @@ jobs:
       matrix:
         include:
           - distribution: focal
-            image: ubuntu:20.04
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-focal-dev:1.0.0
             architecture: amd64
             platform: linux/amd64
             runner: ubuntu-latest
           - distribution: focal
-            image: ubuntu:20.04
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-focal-dev:1.0.0
             architecture: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
           - distribution: jammy
-            image: ubuntu:22.04
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-jammy-dev:1.0.0
             architecture: amd64
             platform: linux/amd64
             runner: ubuntu-latest
           - distribution: jammy
-            image: ubuntu:22.04
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-jammy-dev:1.0.0
             architecture: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
           - distribution: noble
-            image: ubuntu:24.04
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-noble-dev:1.0.0
             architecture: amd64
             platform: linux/amd64
             runner: ubuntu-latest
           - distribution: noble
-            image: ubuntu:24.04
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-noble-dev:1.0.0
             architecture: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
