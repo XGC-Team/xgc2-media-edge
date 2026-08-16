@@ -112,6 +112,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      - name: Prepare host CI directories
+        run: |
+          install -d "$GITHUB_WORKSPACE/.ci/build-manifests"
+
       - name: Build deb and smoke-test in the XGC2 image
         env:
           PACKAGE_DISTRIBUTION: ${{ matrix.distribution }}
@@ -147,7 +151,6 @@ jobs:
       - name: Create trusted build manifest
         run: |
           set -euo pipefail
-          install -d .ci/build-manifests
           product_version="$(awk -F': *' '/^version:/ {print $2; exit}' .xgc2/product.yml)"
           python3 .xgc2/scripts/xgc2_artifact_manifest.py build \
             --deb-dir debs \
