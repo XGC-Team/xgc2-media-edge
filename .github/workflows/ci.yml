@@ -127,6 +127,7 @@ jobs:
             "${{ matrix.image }}" \
             bash -lc '
               set -euo pipefail
+              git config --global --add safe.directory /work
               for pkg in curl dpkg-dev fakeroot file ca-certificates; do
                 dpkg -s "${pkg}" >/dev/null
               done
