@@ -158,11 +158,7 @@ jobs:
             --source-sha "${GITHUB_SHA}" \
             --ci-run-id "${GITHUB_RUN_ID}" \
             --ci-workflow "${GITHUB_WORKFLOW}" \
-            --ci-workflow-ref "${GITHUB_WORKFLOW_REF}" \
-            --prepare-action ci \
-            --dependency-set-digest \
-              4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 \
-            --dependency-mode locked-source
+            --ci-workflow-ref "${GITHUB_WORKFLOW_REF}"
           python3 .xgc2/scripts/xgc2_artifact_manifest.py verify-build \
             --artifact-dir . \
             --deb-output-dir .ci/verified-debs \
@@ -172,11 +168,7 @@ jobs:
             --distribution "${{ matrix.distribution }}" \
             --architecture "${{ matrix.architecture }}" \
             --source-sha "${GITHUB_SHA}" \
-            --ci-run-id "${GITHUB_RUN_ID}" \
-            --prepare-action ci \
-            --dependency-set-digest \
-              4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 \
-            --dependency-mode locked-source
+            --ci-run-id "${GITHUB_RUN_ID}"
 
       - name: Upload trusted deb artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

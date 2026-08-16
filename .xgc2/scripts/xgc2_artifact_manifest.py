@@ -11,14 +11,11 @@ import pathlib
 import re
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from typing import Any
 
 
-BUILD_SCHEMA = "xgc2.build-artifact.v2"
-EMPTY_DEPENDENCY_SET_DIGEST = (
-    "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-)
-PREPARE_ACTIONS = {"ci", "release", "compatibility-verify"}
+BUILD_SCHEMA = "xgc2.build-artifact.v1"
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 BUILD_FIELDS = {
     "schema",
@@ -27,15 +24,16 @@ BUILD_FIELDS = {
     "version",
     "distribution",
     "architecture",
-    "prepareAction",
-    "dependencySetDigest",
-    "dependencyMode",
-    "dependencies",
+    "created_at",
     "ci",
     "debs",
 }
 CI_FIELDS = {"run_id", "workflow", "workflow_ref"}
 DEB_FIELDS = {"file", "package", "version", "architecture", "sha256", "size"}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def deb_field(path: pathlib.Path, field: str) -> str:
@@ -52,15 +50,15 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def validate_contract(
-    *, prepare_action: str, dependency_set_digest: str, dependency_mode: str
-) -> None:
-    if prepare_action not in PREPARE_ACTIONS:
-        raise ValueError("prepareAction is invalid")
-    if dependency_set_digest != EMPTY_DEPENDENCY_SET_DIGEST:
-        raise ValueError("Media Edge dependencySetDigest must identify the empty set")
-    if dependency_mode != "locked-source":
-        raise ValueError("Media Edge has no dependencies and requires locked-source mode")
+def validate_timestamp(value: Any) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError("created_at must be a non-empty timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("created_at must be an ISO 8601 timestamp") from error
+    if parsed.tzinfo is None:
+        raise ValueError("created_at must include a timezone")
 
 
 def deb_entry(path: pathlib.Path, requested_architecture: str) -> dict[str, Any]:
@@ -88,11 +86,6 @@ def write_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
 
 
 def build_manifest(arguments: argparse.Namespace) -> pathlib.Path:
-    validate_contract(
-        prepare_action=arguments.prepare_action,
-        dependency_set_digest=arguments.dependency_set_digest,
-        dependency_mode=arguments.dependency_mode,
-    )
     if SOURCE_SHA.fullmatch(arguments.source_sha) is None:
         raise ValueError("source SHA must contain 40 or 64 lowercase hexadecimal characters")
     deb_dir = pathlib.Path(arguments.deb_dir)
@@ -109,10 +102,7 @@ def build_manifest(arguments: argparse.Namespace) -> pathlib.Path:
         "version": arguments.product_version,
         "distribution": arguments.distribution,
         "architecture": arguments.architecture,
-        "prepareAction": arguments.prepare_action,
-        "dependencySetDigest": arguments.dependency_set_digest,
-        "dependencyMode": arguments.dependency_mode,
-        "dependencies": [],
+        "created_at": utc_now(),
         "ci": {
             "run_id": str(arguments.ci_run_id),
             "workflow": arguments.ci_workflow,
@@ -137,11 +127,6 @@ def validate_deb(path: pathlib.Path, declared: Any, architecture: str) -> None:
 
 
 def verify_manifest(arguments: argparse.Namespace) -> None:
-    validate_contract(
-        prepare_action=arguments.prepare_action,
-        dependency_set_digest=arguments.dependency_set_digest,
-        dependency_mode=arguments.dependency_mode,
-    )
     artifact_root = pathlib.Path(arguments.artifact_dir).resolve(strict=True)
     expected = {
         "product": arguments.product,
@@ -149,10 +134,6 @@ def verify_manifest(arguments: argparse.Namespace) -> None:
         "version": arguments.product_version,
         "distribution": arguments.distribution,
         "architecture": arguments.architecture,
-        "prepareAction": arguments.prepare_action,
-        "dependencySetDigest": arguments.dependency_set_digest,
-        "dependencyMode": arguments.dependency_mode,
-        "dependencies": [],
     }
     candidates: list[tuple[pathlib.Path, dict[str, Any], list[pathlib.Path]]] = []
     for manifest_path in sorted(artifact_root.rglob("*.build.json")):
@@ -163,6 +144,7 @@ def verify_manifest(arguments: argparse.Namespace) -> None:
             raise ValueError(f"unsupported build manifest schema: {manifest_path}")
         if any(manifest.get(key) != value for key, value in expected.items()):
             continue
+        validate_timestamp(manifest.get("created_at"))
         ci = manifest.get("ci")
         if not isinstance(ci, dict) or set(ci) != CI_FIELDS or not all(ci.values()):
             raise ValueError(f"CI identity is invalid: {manifest_path}")
@@ -204,9 +186,6 @@ def parser() -> argparse.ArgumentParser:
     common.add_argument("--architecture", required=True)
     common.add_argument("--source-sha", required=True)
     common.add_argument("--ci-run-id", required=True)
-    common.add_argument("--prepare-action", required=True, choices=sorted(PREPARE_ACTIONS))
-    common.add_argument("--dependency-set-digest", required=True)
-    common.add_argument("--dependency-mode", required=True, choices=["locked-source"])
 
     build = subparsers.add_parser("build", parents=[common])
     build.add_argument("--deb-dir", required=True)

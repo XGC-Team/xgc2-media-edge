@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import hashlib
 import importlib.util
 import json
@@ -21,10 +22,7 @@ TOP_LEVEL_KEYS = {
     "version",
     "distribution",
     "architecture",
-    "prepareAction",
-    "dependencySetDigest",
-    "dependencyMode",
-    "dependencies",
+    "created_at",
     "ci",
     "debs",
 }
@@ -70,29 +68,17 @@ def main() -> int:
                 ci_workflow_ref=(
                     "lxk36/xgc2-media-edge/.github/workflows/ci.yml@refs/heads/main"
                 ),
-                prepare_action="ci",
-                dependency_set_digest=module.EMPTY_DEPENDENCY_SET_DIGEST,
-                dependency_mode="locked-source",
             )
         )
         manifest = json.loads(destination.read_text(encoding="utf-8"))
 
         require(set(manifest) == TOP_LEVEL_KEYS, "unexpected manifest fields")
         require(
-            manifest["schema"] == "xgc2.build-artifact.v2",
+            manifest["schema"] == "xgc2.build-artifact.v1",
             "build manifest schema regressed",
         )
-        require(manifest["prepareAction"] == "ci", "prepareAction is invalid")
-        require(
-            manifest["dependencySetDigest"]
-            == module.EMPTY_DEPENDENCY_SET_DIGEST,
-            "empty dependency digest is invalid",
-        )
-        require(
-            manifest["dependencyMode"] == "locked-source",
-            "dependency mode is invalid",
-        )
-        require(manifest["dependencies"] == [], "leaf dependencies must be empty")
+        created_at = dt.datetime.fromisoformat(manifest["created_at"].replace("Z", "+00:00"))
+        require(created_at.tzinfo is not None, "created_at must include a timezone")
         require(manifest["version"] == "0.2.0-1", "version field is invalid")
         require(
             isinstance(manifest["debs"], list) and len(manifest["debs"]) == 1,
@@ -127,9 +113,6 @@ def main() -> int:
                 architecture="amd64",
                 source_sha="a" * 40,
                 ci_run_id="12345",
-                prepare_action="ci",
-                dependency_set_digest=module.EMPTY_DEPENDENCY_SET_DIGEST,
-                dependency_mode="locked-source",
             )
         )
         require((verified_debs / deb.name).is_file(), "verified deb was not copied")
@@ -137,28 +120,6 @@ def main() -> int:
             (verified_manifests / destination.name).is_file(),
             "verified manifest was not copied",
         )
-
-        for invalid in ("", "0" * 64):
-            try:
-                module.validate_contract(
-                    prepare_action="ci",
-                    dependency_set_digest=invalid,
-                    dependency_mode="locked-source",
-                )
-            except ValueError:
-                pass
-            else:
-                raise SystemExit("non-canonical dependency digest was accepted")
-        try:
-            module.validate_contract(
-                prepare_action="ci",
-                dependency_set_digest=module.EMPTY_DEPENDENCY_SET_DIGEST,
-                dependency_mode="staging-apt",
-            )
-        except ValueError:
-            pass
-        else:
-            raise SystemExit("dependency-free product accepted staging-apt mode")
 
     workflows = {
         name: (SCRIPT_DIR.parent.parent / ".github" / "workflows" / name).read_text(

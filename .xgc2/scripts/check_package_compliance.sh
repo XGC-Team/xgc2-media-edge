@@ -13,17 +13,19 @@ python3 -m py_compile \
 python3 .xgc2/scripts/check_manifest_contract.py
 
 if grep -ERn \
-  'xgc2\.build-artifact\.v1|run_cpp_quality|run_source_tests|actions/(checkout|setup-node|setup-go|upload-artifact)@v[0-9]' \
+  'xgc2\.build-artifact\.v2|run_cpp_quality|run_source_tests|actions/(checkout|setup-node|setup-go|upload-artifact)@v[0-9]' \
   .github/workflows .xgc2/scripts/xgc2_artifact_manifest.py; then
   echo "release contract contains a legacy schema, optional quality gate, or floating action" >&2
   exit 1
 fi
-grep -q 'xgc2.build-artifact.v2' .xgc2/scripts/xgc2_artifact_manifest.py
-grep -q -- '--prepare-action ci' .github/workflows/ci.yml
-grep -q -- '--dependency-mode locked-source' .github/workflows/ci.yml
-grep -q -- '--prepare-action "${{ inputs.prepare_action }}"' \
-  .github/workflows/release.yml
-grep -q -- '--dependency-mode locked-source' .github/workflows/release.yml
+grep -q 'xgc2.build-artifact.v1' .xgc2/scripts/xgc2_artifact_manifest.py
+if grep -ERn -- '--(prepare-action|dependency-set-digest|dependency-mode)' \
+  .github/workflows .xgc2/scripts/xgc2_artifact_manifest.py; then
+  echo "build manifest generation must not embed release dependency inputs" >&2
+  exit 1
+fi
+grep -q '^      prepare_action:' .github/workflows/release.yml
+grep -q '^      dependency_set_digest:' .github/workflows/release.yml
 if [[ "$(grep -c 'verify-build' .github/workflows/ci.yml)" -ne 1 ||
       "$(grep -c 'verify-build' .github/workflows/release.yml)" -ne 1 ]]; then
   echo "CI and release must verify each build manifest before upload" >&2
