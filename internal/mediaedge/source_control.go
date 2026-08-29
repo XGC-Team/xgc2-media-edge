@@ -28,12 +28,16 @@ var requiredSourceCapabilities = [...]string{
 	"set-active",
 	"request-keyframe",
 	"snapshot",
+	"fresh-snapshot",
 }
 
 type sourceControlRequest struct {
-	Operation  string `json:"operation"`
-	SnapshotID string `json:"snapshotId,omitempty"`
-	Active     *bool  `json:"active,omitempty"`
+	Operation       string `json:"operation"`
+	SnapshotID      string `json:"snapshotId,omitempty"`
+	Active          *bool  `json:"active,omitempty"`
+	IncludeRGB      *bool  `json:"includeRgb,omitempty"`
+	RequestKeyframe *bool  `json:"requestKeyframe,omitempty"`
+	RequireFresh    *bool  `json:"requireFresh,omitempty"`
 }
 
 type sourceControlResponse struct {
@@ -216,6 +220,22 @@ type Snapshot struct {
 	ExpiresAt            time.Time
 }
 
+// SnapshotCaptureRequest selects only source work needed by one local
+// consumer. Nil retains the original full RGB + keyframe behavior.
+type SnapshotCaptureRequest struct {
+	IncludeRGB      *bool `json:"includeRgb,omitempty"`
+	RequestKeyframe *bool `json:"requestKeyframe,omitempty"`
+	RequireFresh    *bool `json:"requireFresh,omitempty"`
+}
+
+func (request SnapshotCaptureRequest) includeRGB() bool {
+	return request.IncludeRGB == nil || *request.IncludeRGB
+}
+
+func (request SnapshotCaptureRequest) requestKeyframe() bool {
+	return request.RequestKeyframe == nil || *request.RequestKeyframe
+}
+
 // SnapshotRenderPose is the optional camera pose at the exact render captured
 // by a source snapshot. Older sources omit both this value and PoseFrameID.
 type SnapshotRenderPose struct {
@@ -326,8 +346,11 @@ func callSourceControl(
 	if request.Operation != "snapshot" {
 		return response, nil, nil, nil
 	}
+	includeRGB := request.IncludeRGB == nil || *request.IncludeRGB
 	if response.JPEGBytes < 2 || response.JPEGBytes > 32<<20 ||
-		response.RGBBytes < 1 || response.RGBBytes > 128<<20 {
+		(includeRGB && (response.RGBBytes < 1 || response.RGBBytes > 128<<20)) ||
+		(!includeRGB && response.RGBBytes != 0 &&
+			(response.RGBBytes < 1 || response.RGBBytes > 128<<20)) {
 		return sourceControlResponse{}, nil, nil, errors.New("capture source snapshot sizes are invalid")
 	}
 	jpeg := make([]byte, response.JPEGBytes)

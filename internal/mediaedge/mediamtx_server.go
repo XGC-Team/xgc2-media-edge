@@ -753,7 +753,11 @@ func (server *MediaMTXServer) SourceStatuses() []SourceStatus {
 	return statuses
 }
 
-func (server *MediaMTXServer) CaptureSnapshot(ctx context.Context, sourceID string) (Snapshot, error) {
+func (server *MediaMTXServer) CaptureSnapshot(
+	ctx context.Context,
+	sourceID string,
+	request SnapshotCaptureRequest,
+) (Snapshot, error) {
 	operationContext, finishOperation, err := server.beginOperation(ctx)
 	if err != nil {
 		return Snapshot{}, err
@@ -772,7 +776,8 @@ func (server *MediaMTXServer) CaptureSnapshot(ctx context.Context, sourceID stri
 		return Snapshot{}, err
 	}
 	response, jpeg, rgb, err := callSourceControl(operationContext, source.config.ControlSocket, sourceControlRequest{
-		Operation: "snapshot", SnapshotID: id,
+		Operation: "snapshot", SnapshotID: id, IncludeRGB: request.IncludeRGB,
+		RequestKeyframe: request.RequestKeyframe, RequireFresh: request.RequireFresh,
 	})
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("capture source snapshot: %w", err)
@@ -781,8 +786,15 @@ func (server *MediaMTXServer) CaptureSnapshot(ctx context.Context, sourceID stri
 		return Snapshot{}, errors.New("capture source returned a mismatched snapshot ID")
 	}
 	if response.Width != source.config.Width || response.Height != source.config.Height ||
-		response.RGBBytes != response.Width*response.Height*3 || response.PixelFormat != "rgb8" {
+		response.PixelFormat != "rgb8" {
 		return Snapshot{}, errors.New("capture source snapshot metadata does not match the media source")
+	}
+	if request.includeRGB() {
+		if response.RGBBytes != response.Width*response.Height*3 || len(rgb) != response.RGBBytes {
+			return Snapshot{}, errors.New("capture source snapshot RGB does not match the media source")
+		}
+	} else if response.RGBBytes != 0 || len(rgb) != 0 {
+		return Snapshot{}, errors.New("JPEG-only capture source returned forbidden RGB")
 	}
 	if len(response.CameraMatrix) != 9 || len(response.Distortion) < 4 {
 		return Snapshot{}, errors.New("capture source snapshot does not contain camera intrinsics")

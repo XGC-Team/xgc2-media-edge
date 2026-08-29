@@ -33,7 +33,12 @@ func TestCaptureSnapshotPassesThroughOptionalSourceRenderPose(t *testing.T) {
 	}
 	defer server.Close()
 
-	snapshot, err := server.CaptureSnapshot(context.Background(), "camera")
+	includeRGB := false
+	requestKeyframe := false
+	requireFresh := true
+	snapshot, err := server.CaptureSnapshot(context.Background(), "camera", SnapshotCaptureRequest{
+		IncludeRGB: &includeRGB, RequestKeyframe: &requestKeyframe, RequireFresh: &requireFresh,
+	})
 	if err != nil {
 		t.Fatalf("capture snapshot with render pose: %v", err)
 	}
@@ -42,6 +47,14 @@ func TestCaptureSnapshotPassesThroughOptionalSourceRenderPose(t *testing.T) {
 		snapshot.TimestampClockDomain != "simulation" {
 		t.Fatalf("captured render pose = %+v frame=%q", snapshot.RenderPose, snapshot.PoseFrameID)
 	}
+	if len(snapshot.RGB) != 0 || len(snapshot.JPEG) == 0 {
+		t.Fatalf("JPEG-only snapshot payload RGB=%d JPEG=%d", len(snapshot.RGB), len(snapshot.JPEG))
+	}
+	capture.waitFor(t, 1, func(request sourceControlRequest) bool {
+		return request.Operation == "snapshot" && request.IncludeRGB != nil && !*request.IncludeRGB &&
+			request.RequestKeyframe != nil && !*request.RequestKeyframe &&
+			request.RequireFresh != nil && *request.RequireFresh
+	})
 	metadata := snapshot.metadata()
 	if metadata.RenderPose == nil || metadata.PoseFrameID != "gazebo_world" ||
 		metadata.TimestampClockDomain != "simulation" {

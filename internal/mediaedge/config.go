@@ -23,9 +23,9 @@ const (
 	ControlDataChannelLabel = "xgc-media-control.v1"
 
 	defaultSessionGrace = 10 * time.Second
-	// Snapshots contain uncompressed RGB. At 4K one snapshot is roughly 24 MiB,
-	// so these are intentionally short-lived calibration transactions, not a
-	// second video buffer in the media edge.
+	// Full snapshots can contain uncompressed RGB. At 4K that representation is
+	// roughly 24 MiB; JPEG-only callers omit it. Both forms are intentionally
+	// short-lived calibration transactions, not a second video buffer in Edge.
 	defaultSnapshotTTL = 15 * time.Second
 	maximumSnapshots   = 2
 

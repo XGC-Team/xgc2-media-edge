@@ -2,15 +2,32 @@ package mediaedge
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestDescribeSourceRejectsMissingFreshSnapshotCapability(t *testing.T) {
+	description := defaultCaptureDescription()
+	description.Capabilities = []string{"set-active", "request-keyframe", "snapshot"}
+	control := newCaptureControlWithDescription(t, description)
+	defer control.close()
+	address := availableLoopbackRTPAddress(t)
+	control.setRTPDestination(t, address)
+	_, err := describeSource(context.Background(), SourceConfig{
+		ID: "camera", RTPListenAddress: address, ControlSocket: control.socket,
+	})
+	if err == nil || !strings.Contains(err.Error(), `required capability "fresh-snapshot"`) {
+		t.Fatalf("missing fresh snapshot capability error=%v", err)
+	}
+}
 
 type captureControl struct {
 	socket              string
@@ -110,6 +127,9 @@ func (control *captureControl) handle(connection net.Conn) {
 		return
 	}
 	rgb := make([]byte, 16*16*3)
+	if request.IncludeRGB != nil && !*request.IncludeRGB {
+		rgb = nil
+	}
 	jpeg := []byte("\xff\xd8xgc\xff\xd9")
 	control.descriptionMu.RLock()
 	renderPose := cloneSnapshotRenderPose(control.snapshotRenderPose)

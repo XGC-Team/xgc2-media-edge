@@ -34,7 +34,7 @@ type httpBackend interface {
 	Recordings() []RecordingManifest
 	Recording(string) (RecordingManifest, bool)
 	StopRecording(context.Context, string) (RecordingManifest, error)
-	CaptureSnapshot(context.Context, string) (Snapshot, error)
+	CaptureSnapshot(context.Context, string, SnapshotCaptureRequest) (Snapshot, error)
 	Snapshot(string) (Snapshot, bool)
 	DeleteSnapshot(string) bool
 }
@@ -405,7 +405,11 @@ func (server *httpServer) closeSession(writer http.ResponseWriter, sessionID str
 }
 
 func (server *httpServer) captureSnapshot(writer http.ResponseWriter, request *http.Request, sourceID string) {
-	snapshot, err := server.server.CaptureSnapshot(request.Context(), sourceID)
+	var input SnapshotCaptureRequest
+	if !decodeJSON(writer, request, &input) {
+		return
+	}
+	snapshot, err := server.server.CaptureSnapshot(request.Context(), sourceID, input)
 	if err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "was not found") {
