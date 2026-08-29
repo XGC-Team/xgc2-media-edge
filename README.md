@@ -49,12 +49,36 @@ the connection path.
 
 ### UDP receive-buffer contract
 
-The generated MediaMTX configuration always contains
-`udpReadBufferSize: 0`. In MediaMTX this means the operating-system default.
-Edge does not expose another buffer setting, inspect the host limit, retry with
-a different value, alter a `sysctl`, or require container privileges. This is
-one portable startup contract; whether a target's ordinary socket capacity is
-enough for its peak stream remains a deployment acceptance result.
+The generated MediaMTX configuration requests `udpReadBufferSize: 8388608`
+(8 MiB). A 4K H264 frame is fragmented across many loopback RTP packets; the
+ordinary Linux 208 KiB receive queue loses FU-A fragments when motion increases
+the encoded frame burst, even when the source camera itself remains at 30 Hz.
+Deployments must therefore set `net.core.rmem_max >= 8388608` before Edge opens
+its RTP socket. XGC2 local-fleet owns that host-network setup explicitly and
+fails its runtime status check when the contract is absent. Edge still does not
+auto-tune or silently retry with a different value.
+
+Size the queue from a bounded encoder, never from a static-scene FPS reading.
+For one RTP source, a conservative userspace request is
+
+```text
+Bsocket >= S × (VBVbits / 8 + Rmax × Tsched / 8) × (1 + Hrtp-ip-udp / Prtp)
+```
+
+where `VBVbits` is the encoder VBV buffer (a conservative access-unit burst
+bound), `Rmax` is the configured maximum bitrate, `Tsched` is the longest
+receiver scheduling pause admitted by the deployment, `Prtp` is RTP payload
+bytes per datagram, `Hrtp-ip-udp` is the corresponding header bytes, and `S`
+is the safety factor. Without explicit `maxrate` and `VBVbits`, nominal average
+bitrate provides no finite burst bound and this calculation is invalid.
+
+The local-fleet 4K30 contract uses `Rmax = VBVbits = 25,000,000`,
+`Tsched = 0.1 s`, `Prtp = 1200`, approximately 40 header bytes, and `S = 2`:
+the result is about 7.1 MB, rounded up to 8 MiB. Linux may report roughly twice
+the requested value in `ss -m` because of kernel accounting; do not multiply
+the engineering requirement by that reporting convention. Each source owns a
+separate socket queue, and the kernel consumes the capacity on demand rather
+than reserving the full maximum for every idle source.
 
 Every Debian package matrix entry proves this contract with the real bundled
 MediaMTX binary. The automated probe extracts that binary, runs it as numeric
@@ -138,7 +162,7 @@ The source must answer one newline-delimited JSON object:
   "height": 1080,
   "fps": 30,
   "frameId": "camera_optical",
-  "capabilities": ["set-active", "request-keyframe", "snapshot"]
+  "capabilities": ["set-active", "request-keyframe", "snapshot", "fresh-snapshot"]
 }
 ```
 
@@ -158,12 +182,19 @@ The same newline-delimited JSON Unix protocol supports:
 - `request-keyframe`;
 - `snapshot`.
 
-A snapshot is one immutable transaction containing display JPEG bytes, exact
-RGB8 bytes, camera intrinsics, distortion coefficients, frame ID, and a
-source-clock timestamp. New sources also identify that timestamp's clock
-domain using the `xgc_camera_msgs/StreamInfo` vocabulary. A source may return
-the fields below; Edge passes them through without requiring them from older
-protocol-v1 sources:
+A snapshot is one immutable transaction containing display JPEG bytes, camera
+intrinsics, distortion coefficients, frame ID, and a source-clock timestamp.
+The legacy/default request also carries exact RGB8 bytes; a detector may send
+`{"includeRgb":false,"requestKeyframe":false,"requireFresh":true}` to receive
+only the first source frame completed after its request, without coupling the
+transaction to the H264 GOP. Sources may additionally report the actual JPEG
+backend/readback path, fallback reason, and bounded timing diagnostics; Edge
+retains these fields with the immutable snapshot metadata.
+
+New sources also identify the timestamp's clock domain using the
+`xgc_camera_msgs/StreamInfo` vocabulary. A source may return the fields below;
+Edge passes them through without requiring them from older protocol-v1
+sources:
 
 ```json
 {

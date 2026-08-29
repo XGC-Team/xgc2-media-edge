@@ -36,8 +36,8 @@ func TestRenderPinsMinimalMediaMTXSurface(t *testing.T) {
 	if rendered["webrtcLocalUDPAddress"] != "0.0.0.0:18189" || rendered["apiAddress"] != "127.0.0.1:19997" {
 		t.Fatalf("rendered boundaries = %#v", rendered)
 	}
-	if value, found := rendered["udpReadBufferSize"]; !found || value != float64(0) {
-		t.Fatalf("udpReadBufferSize = %#v found=%v, want explicit OS default 0", value, found)
+	if value, found := rendered["udpReadBufferSize"]; !found || value != float64(8<<20) {
+		t.Fatalf("udpReadBufferSize = %#v found=%v, want 8 MiB", value, found)
 	}
 	if ice, ok := rendered["webrtcICEServers2"].([]any); !ok || ice == nil || len(ice) != 0 {
 		t.Fatalf("empty ICE server list = %#v, want an empty array", rendered["webrtcICEServers2"])

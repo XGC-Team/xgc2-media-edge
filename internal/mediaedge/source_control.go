@@ -41,19 +41,22 @@ type sourceControlRequest struct {
 }
 
 type sourceControlResponse struct {
-	OK              bool     `json:"ok"`
-	Error           string   `json:"error,omitempty"`
-	ProtocolVersion int      `json:"protocolVersion,omitempty"`
-	SourceID        string   `json:"sourceId,omitempty"`
-	Codec           string   `json:"codec,omitempty"`
-	RTPPayloadType  int      `json:"rtpPayloadType,omitempty"`
-	RTPClockRate    int      `json:"rtpClockRate,omitempty"`
-	RTPHost         string   `json:"rtpHost,omitempty"`
-	RTPPort         int      `json:"rtpPort,omitempty"`
-	FPS             float64  `json:"fps,omitempty"`
-	Capabilities    []string `json:"capabilities,omitempty"`
-	SnapshotID      string   `json:"snapshotId,omitempty"`
-	FrameID         string   `json:"frameId,omitempty"`
+	OK                        bool     `json:"ok"`
+	Error                     string   `json:"error,omitempty"`
+	ProtocolVersion           int      `json:"protocolVersion,omitempty"`
+	SourceID                  string   `json:"sourceId,omitempty"`
+	Codec                     string   `json:"codec,omitempty"`
+	RTPPayloadType            int      `json:"rtpPayloadType,omitempty"`
+	RTPClockRate              int      `json:"rtpClockRate,omitempty"`
+	RTPHost                   string   `json:"rtpHost,omitempty"`
+	RTPPort                   int      `json:"rtpPort,omitempty"`
+	FPS                       float64  `json:"fps,omitempty"`
+	Capabilities              []string `json:"capabilities,omitempty"`
+	SnapshotJpegPolicy        string   `json:"snapshotJpegPolicy,omitempty"`
+	SnapshotJpegBackend       string   `json:"snapshotJpegBackend,omitempty"`
+	SnapshotJpegHardwareState string   `json:"snapshotJpegHardwareState,omitempty"`
+	SnapshotID                string   `json:"snapshotId,omitempty"`
+	FrameID                   string   `json:"frameId,omitempty"`
 	// TimestampNanoseconds is in the source clock domain. A Gazebo source uses
 	// simulation time, so calling it UnixNano would be materially incorrect.
 	TimestampNanoseconds int64 `json:"timestampNanoseconds,omitempty"`
@@ -65,6 +68,11 @@ type sourceControlResponse struct {
 	PixelFormat          string              `json:"pixelFormat,omitempty"`
 	JPEGBytes            int                 `json:"jpegBytes,omitempty"`
 	RGBBytes             int                 `json:"rgbBytes,omitempty"`
+	JPEGBackend          string              `json:"jpegBackend,omitempty"`
+	JPEGReadback         string              `json:"jpegReadback,omitempty"`
+	JPEGFallbackReason   string              `json:"jpegFallbackReason,omitempty"`
+	JPEGReadbackMillis   float64             `json:"jpegReadbackMilliseconds,omitempty"`
+	JPEGEncodeMillis     float64             `json:"jpegEncodeMilliseconds,omitempty"`
 	CameraMatrix         []float64           `json:"cameraMatrix,omitempty"`
 	Distortion           []float64           `json:"distortion,omitempty"`
 	RenderPose           *SnapshotRenderPose `json:"renderPose,omitempty"`
@@ -213,6 +221,11 @@ type Snapshot struct {
 	PixelFormat          string
 	JPEG                 []byte
 	RGB                  []byte
+	JPEGBackend          string
+	JPEGReadback         string
+	JPEGFallbackReason   string
+	JPEGReadbackMillis   float64
+	JPEGEncodeMillis     float64
 	CameraMatrix         []float64
 	Distortion           []float64
 	RenderPose           *SnapshotRenderPose
@@ -262,8 +275,12 @@ func (snapshot Snapshot) metadata() snapshotMetadata {
 		TimestampNanoseconds: snapshot.TimestampNanoseconds, TimestampClockDomain: snapshot.TimestampClockDomain,
 		Width: snapshot.Width, Height: snapshot.Height,
 		PixelFormat: snapshot.PixelFormat, JPEGBytes: len(snapshot.JPEG), CameraMatrix: append([]float64(nil), snapshot.CameraMatrix...),
-		Distortion: append([]float64(nil), snapshot.Distortion...),
-		RenderPose: cloneSnapshotRenderPose(snapshot.RenderPose), PoseFrameID: snapshot.PoseFrameID,
+		JPEGBackend: snapshot.JPEGBackend, JPEGReadback: snapshot.JPEGReadback,
+		JPEGFallbackReason: snapshot.JPEGFallbackReason,
+		JPEGReadbackMillis: snapshot.JPEGReadbackMillis,
+		JPEGEncodeMillis:   snapshot.JPEGEncodeMillis,
+		Distortion:         append([]float64(nil), snapshot.Distortion...),
+		RenderPose:         cloneSnapshotRenderPose(snapshot.RenderPose), PoseFrameID: snapshot.PoseFrameID,
 	}
 }
 
@@ -277,6 +294,11 @@ type snapshotMetadata struct {
 	Height               int                 `json:"height"`
 	PixelFormat          string              `json:"pixelFormat"`
 	JPEGBytes            int                 `json:"jpegBytes"`
+	JPEGBackend          string              `json:"jpegBackend,omitempty"`
+	JPEGReadback         string              `json:"jpegReadback,omitempty"`
+	JPEGFallbackReason   string              `json:"jpegFallbackReason,omitempty"`
+	JPEGReadbackMillis   float64             `json:"jpegReadbackMilliseconds,omitempty"`
+	JPEGEncodeMillis     float64             `json:"jpegEncodeMilliseconds,omitempty"`
 	CameraMatrix         []float64           `json:"cameraMatrix"`
 	Distortion           []float64           `json:"distortion"`
 	RenderPose           *SnapshotRenderPose `json:"renderPose,omitempty"`

@@ -50,6 +50,11 @@ func TestCaptureSnapshotPassesThroughOptionalSourceRenderPose(t *testing.T) {
 	if len(snapshot.RGB) != 0 || len(snapshot.JPEG) == 0 {
 		t.Fatalf("JPEG-only snapshot payload RGB=%d JPEG=%d", len(snapshot.RGB), len(snapshot.JPEG))
 	}
+	if snapshot.JPEGBackend != "source-jpeg-passthrough" ||
+		snapshot.JPEGReadback != "latest-compressed-frame" ||
+		snapshot.JPEGReadbackMillis != 0.25 || snapshot.JPEGEncodeMillis != 0 {
+		t.Fatalf("snapshot JPEG diagnostics were not preserved: %+v", snapshot)
+	}
 	capture.waitFor(t, 1, func(request sourceControlRequest) bool {
 		return request.Operation == "snapshot" && request.IncludeRGB != nil && !*request.IncludeRGB &&
 			request.RequestKeyframe != nil && !*request.RequestKeyframe &&
@@ -57,7 +62,9 @@ func TestCaptureSnapshotPassesThroughOptionalSourceRenderPose(t *testing.T) {
 	})
 	metadata := snapshot.metadata()
 	if metadata.RenderPose == nil || metadata.PoseFrameID != "gazebo_world" ||
-		metadata.TimestampClockDomain != "simulation" {
+		metadata.TimestampClockDomain != "simulation" ||
+		metadata.JPEGBackend != "source-jpeg-passthrough" ||
+		metadata.JPEGReadback != "latest-compressed-frame" {
 		t.Fatalf("snapshot metadata lost render pose: %+v", metadata)
 	}
 }

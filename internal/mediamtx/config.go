@@ -21,11 +21,11 @@ const (
 	LinuxAMD64SHA256 = "952d5f7d31d1b448ab4da4509550594c511d42636db9d7bb175d377f4ede81df"
 	LinuxARM64SHA256 = "6aa3c03da7b6477f1e110c8e18e819cf9ef121e8981b52b8f8219982dae35f2f"
 
-	// Zero is MediaMTX's explicit operating-system-default contract. A non-zero
-	// value is capped by the host's receive-buffer policy and can make startup
-	// require a host sysctl or extra container privileges. Buffer capacity is a
-	// deployment acceptance concern, not a runtime fallback owned by Edge.
-	udpReadBufferSize = 0
+	// One 4K H264 frame can arrive as a dense loopback RTP burst. Linux's common
+	// 208 KiB default queue loses FU-A fragments under motion even while the
+	// camera source itself remains at 30 Hz. Edge requests an explicit 8 MiB
+	// queue; deployments must raise net.core.rmem_max to at least this value.
+	udpReadBufferSize = 8 << 20
 )
 
 var pathName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)

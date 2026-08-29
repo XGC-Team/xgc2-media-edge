@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"path/filepath"
@@ -799,14 +800,28 @@ func (server *MediaMTXServer) CaptureSnapshot(
 	if len(response.CameraMatrix) != 9 || len(response.Distortion) < 4 {
 		return Snapshot{}, errors.New("capture source snapshot does not contain camera intrinsics")
 	}
+	jpegBackend := strings.TrimSpace(response.JPEGBackend)
+	jpegReadback := strings.TrimSpace(response.JPEGReadback)
+	jpegFallbackReason := strings.TrimSpace(response.JPEGFallbackReason)
+	if len(jpegBackend) > 64 || len(jpegReadback) > 64 ||
+		len(jpegFallbackReason) > 512 || response.JPEGReadbackMillis < 0 ||
+		response.JPEGEncodeMillis < 0 || math.IsNaN(response.JPEGReadbackMillis) ||
+		math.IsNaN(response.JPEGEncodeMillis) || math.IsInf(response.JPEGReadbackMillis, 0) ||
+		math.IsInf(response.JPEGEncodeMillis, 0) {
+		return Snapshot{}, errors.New("capture source snapshot JPEG diagnostics are invalid")
+	}
 	snapshot := Snapshot{
 		ID: id, SourceID: source.config.ID, FrameID: response.FrameID,
 		TimestampNanoseconds: response.TimestampNanoseconds,
 		TimestampClockDomain: strings.ToLower(strings.TrimSpace(response.TimestampClockDomain)),
 		Width:                response.Width, Height: response.Height, PixelFormat: response.PixelFormat,
 		JPEG: jpeg, RGB: rgb, CameraMatrix: append([]float64(nil), response.CameraMatrix...),
-		Distortion: append([]float64(nil), response.Distortion...),
-		RenderPose: cloneSnapshotRenderPose(response.RenderPose), PoseFrameID: response.PoseFrameID,
+		JPEGBackend: jpegBackend, JPEGReadback: jpegReadback,
+		JPEGFallbackReason: jpegFallbackReason,
+		JPEGReadbackMillis: response.JPEGReadbackMillis,
+		JPEGEncodeMillis:   response.JPEGEncodeMillis,
+		Distortion:         append([]float64(nil), response.Distortion...),
+		RenderPose:         cloneSnapshotRenderPose(response.RenderPose), PoseFrameID: response.PoseFrameID,
 		ExpiresAt: time.Now().Add(server.config.SnapshotTTL),
 	}
 	if snapshot.FrameID == "" {

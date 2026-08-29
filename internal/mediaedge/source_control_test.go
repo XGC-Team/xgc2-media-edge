@@ -140,6 +140,8 @@ func (control *captureControl) handle(connection net.Conn) {
 		TimestampNanoseconds: 1700000000000000000, TimestampClockDomain: "simulation",
 		Width: 16, Height: 16, PixelFormat: "rgb8", JPEGBytes: len(jpeg), RGBBytes: len(rgb),
 		CameraMatrix: []float64{5, 0, 8, 0, 5, 8, 0, 0, 1}, Distortion: []float64{0, 0, 0, 0, 0},
+		JPEGBackend: "source-jpeg-passthrough", JPEGReadback: "latest-compressed-frame",
+		JPEGReadbackMillis: 0.25, JPEGEncodeMillis: 0,
 		RenderPose: renderPose, PoseFrameID: poseFrameID,
 	}
 	encoded, _ := json.Marshal(response)
