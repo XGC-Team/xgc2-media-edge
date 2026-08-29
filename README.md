@@ -85,7 +85,10 @@ MediaMTX binary. The automated probe extracts that binary, runs it as numeric
 UID/GID 65532 with all Linux capabilities dropped, no external network, a
 read-only root filesystem, and `no-new-privileges`, then waits for the actual
 MediaMTX API to report the configured RTP path. No mock process or readiness
-response is used.
+response is used. That deliberately isolated binary probe sets only its
+temporary MediaMTX config to the OS-default queue because it cannot raise the
+host `rmem_max`; source config tests independently keep the product default at
+8 MiB, and each deployment still proves the host prerequisite before startup.
 
 ## Browser surface
 

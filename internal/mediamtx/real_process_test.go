@@ -3,7 +3,9 @@ package mediamtx
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -12,11 +14,12 @@ import (
 
 const realMediaMTXExecutableEnv = "XGC2_MEDIAMTX_TEST_EXECUTABLE"
 
-// TestRealMediaMTXStartsWithOSDefaultUDPBuffer is compiled into the package
-// readiness probe by verify_unprivileged_mediamtx.sh. Normal source tests skip
-// it because the pinned release binary belongs to the Debian artifact, not the
-// Go source tree.
-func TestRealMediaMTXStartsWithOSDefaultUDPBuffer(t *testing.T) {
+// TestRealMediaMTXStartsInUnprivilegedProbe is compiled into the package
+// readiness probe by verify_unprivileged_mediamtx.sh. Product config tests own
+// the 8 MiB receive-buffer default; this probe deliberately sets the upstream
+// binary to the OS default because its no-capability container cannot raise the
+// host rmem_max deployment prerequisite.
+func TestRealMediaMTXStartsInUnprivilegedProbe(t *testing.T) {
 	executable := strings.TrimSpace(os.Getenv(realMediaMTXExecutableEnv))
 	if executable == "" {
 		t.Skip(realMediaMTXExecutableEnv + " is not set")
@@ -27,20 +30,31 @@ func TestRealMediaMTXStartsWithOSDefaultUDPBuffer(t *testing.T) {
 		t.Fatalf("real MediaMTX executable is not executable: %s", executable)
 	}
 
+	apiAddress := freeTCPAddress(t)
+	whepAddress := freeTCPAddress(t)
 	configuration, err := Render(Config{
-		APIAddress:        "127.0.0.1:19997",
-		WHEPAddress:       "127.0.0.1:18889",
-		ICEUDPAddress:     "127.0.0.1:18189",
+		APIAddress:        apiAddress,
+		WHEPAddress:       whepAddress,
+		ICEUDPAddress:     freeUDPAddress(t),
 		IPsFromInterfaces: true,
 		Paths: []Path{{
 			Name:       "readiness",
-			RTPAddress: "127.0.0.1:15004",
+			RTPAddress: freeUDPAddress(t),
 		}},
 	})
 	if err != nil {
 		t.Fatalf("render real MediaMTX configuration: %v", err)
 	}
-	client, err := NewClient("http://127.0.0.1:19997", "http://127.0.0.1:18889")
+	var probeConfiguration map[string]any
+	if err := json.Unmarshal(configuration, &probeConfiguration); err != nil {
+		t.Fatalf("decode real MediaMTX probe configuration: %v", err)
+	}
+	probeConfiguration["udpReadBufferSize"] = 0
+	configuration, err = json.Marshal(probeConfiguration)
+	if err != nil {
+		t.Fatalf("encode real MediaMTX probe configuration: %v", err)
+	}
+	client, err := NewClient("http://"+apiAddress, "http://"+whepAddress)
 	if err != nil {
 		t.Fatalf("create real MediaMTX client: %v", err)
 	}
@@ -73,7 +87,7 @@ func TestRealMediaMTXStartsWithOSDefaultUDPBuffer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := process.Start(ctx); err != nil {
-		t.Fatalf("start real MediaMTX with OS-default UDP buffer: %v\n%s", err, logs.String())
+		t.Fatalf("start real MediaMTX in unprivileged probe: %v\n%s", err, logs.String())
 	}
 	if err := readiness(ctx); err != nil {
 		t.Fatalf("real MediaMTX lost readiness after startup: %v\n%s", err, logs.String())
@@ -81,4 +95,30 @@ func TestRealMediaMTXStartsWithOSDefaultUDPBuffer(t *testing.T) {
 	if err := process.Close(); err != nil {
 		t.Fatalf("stop real MediaMTX: %v\n%s", err, logs.String())
 	}
+}
+
+func freeTCPAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("allocate TCP probe address: %v", err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release TCP probe address: %v", err)
+	}
+	return address
+}
+
+func freeUDPAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("allocate UDP probe address: %v", err)
+	}
+	address := listener.LocalAddr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release UDP probe address: %v", err)
+	}
+	return address
 }

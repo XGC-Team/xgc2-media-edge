@@ -64,6 +64,6 @@ docker run --rm \
   "${container_image}" \
   /runtime/mediamtx.test \
     -test.v \
-    -test.run '^TestRealMediaMTXStartsWithOSDefaultUDPBuffer$'
+    -test.run '^TestRealMediaMTXStartsInUnprivilegedProbe$'
 
 echo "MediaMTX readiness passed as uid 65532 with no capabilities and a read-only root filesystem."
