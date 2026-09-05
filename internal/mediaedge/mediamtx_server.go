@@ -94,6 +94,7 @@ type mediaMTXSource struct {
 	sessions             map[string]struct{}
 	pending              int
 	active               bool
+	deactivateUncertain  bool
 	recordingID          string
 
 	deactivateTimer *time.Timer
@@ -107,6 +108,7 @@ type mediaMTXSource struct {
 
 	lastKeyframeRequestAt time.Time
 	lastRecoveryAttemptAt time.Time
+	recoveryPending       bool
 	snapshots             map[string]Snapshot
 	snapshotOrder         []string
 }
@@ -485,7 +487,7 @@ func (source *mediaMTXSource) acquire(ctx context.Context) error {
 	source.mu.Lock()
 	source.pending++
 	source.cancelDeactivateTimerLocked()
-	if source.active {
+	if source.active && !source.deactivateUncertain {
 		source.mu.Unlock()
 		return nil
 	}
@@ -496,11 +498,16 @@ func (source *mediaMTXSource) acquire(ctx context.Context) error {
 	}); err != nil {
 		source.mu.Lock()
 		source.pending--
+		unused := source.active && !source.hasConsumersLocked()
 		source.mu.Unlock()
+		if unused {
+			source.scheduleDeactivate()
+		}
 		return err
 	}
 	source.mu.Lock()
 	source.active = true
+	source.deactivateUncertain = false
 	source.activeSince = time.Now()
 	source.lastRecoveryAttemptAt = time.Time{}
 	source.mu.Unlock()
@@ -581,16 +588,30 @@ func (source *mediaMTXSource) deactivateIfUnused(epoch uint64) {
 		return
 	}
 	source.deactivateTimer = nil
-	source.active = false
-	source.activeSince = time.Time{}
-	source.lastRecoveryAttemptAt = time.Time{}
 	source.mu.Unlock()
 	ctx, cancel := context.WithTimeout(source.server.lifecycleContext, sourceControlRequestTimeout)
 	defer cancel()
 	active := false
-	_, _, _, _ = callSourceControl(ctx, source.config.ControlSocket, sourceControlRequest{
+	_, _, _, err := callSourceControl(ctx, source.config.ControlSocket, sourceControlRequest{
 		Operation: "set-active", Active: &active,
 	})
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	if err != nil {
+		// A lost reply does not prove whether the adapter stopped. Keep the
+		// lease active, retry stop, and make a new acquire confirm activation.
+		source.deactivateUncertain = true
+		if source.server.lifecycleContext.Err() == nil && epoch == source.deactivateEpoch && !source.hasConsumersLocked() {
+			source.deactivateTimer = time.AfterFunc(sourceRecoveryMinimumInterval, func() {
+				source.deactivateIfUnused(epoch)
+			})
+		}
+		return
+	}
+	source.active = false
+	source.deactivateUncertain = false
+	source.activeSince = time.Time{}
+	source.lastRecoveryAttemptAt = time.Time{}
 }
 
 func (source *mediaMTXSource) requestKeyframeAsync(force bool) {
@@ -700,25 +721,40 @@ func (source *mediaMTXSource) observePath(now time.Time, status mtx.PathStatus) 
 	if lastActivity.Before(source.activeSince) {
 		lastActivity = source.activeSince
 	}
-	recover := source.active && source.consumerCountLocked() > 0 && !lastActivity.IsZero() &&
+	recover := !source.recoveryPending && source.active && source.consumerCountLocked() > 0 && !lastActivity.IsZero() &&
 		now.Sub(lastActivity) >= sourceStallTimeout &&
 		(source.lastRecoveryAttemptAt.IsZero() || now.Sub(source.lastRecoveryAttemptAt) >= sourceRecoveryMinimumInterval)
+	recoveryEpoch := source.deactivateEpoch
 	if recover {
 		source.lastRecoveryAttemptAt = now
+		source.recoveryPending = true
 	}
 	source.mu.Unlock()
 	if bytesChanged && recordingID != "" {
 		source.server.markMediaMTXRecordingActive(recordingID, now)
 	}
 	if recover {
-		go source.recover()
+		go source.recover(recoveryEpoch)
 	}
 }
 
-func (source *mediaMTXSource) recover() {
+func (source *mediaMTXSource) recover(epoch uint64) {
 	source.lifecycleMu.Lock()
 	defer source.lifecycleMu.Unlock()
+	defer func() {
+		source.mu.Lock()
+		source.recoveryPending = false
+		source.mu.Unlock()
+	}()
 	if source.server.isClosing() {
+		return
+	}
+	// Demand may have disappeared or been replaced while this task waited
+	// for lifecycleMu. Never let an old recovery resurrect an idle source.
+	source.mu.Lock()
+	current := epoch == source.deactivateEpoch && source.active && source.hasConsumersLocked()
+	source.mu.Unlock()
+	if !current {
 		return
 	}
 	ctx, cancel := context.WithTimeout(source.server.lifecycleContext, sourceControlRequestTimeout)
