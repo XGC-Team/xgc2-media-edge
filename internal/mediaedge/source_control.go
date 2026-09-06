@@ -346,16 +346,18 @@ func callSourceControl(
 	if err := json.NewEncoder(connection).Encode(request); err != nil {
 		return sourceControlResponse{}, nil, nil, fmt.Errorf("write capture source request: %w", err)
 	}
-	reader := bufio.NewReader(connection)
-	header, err := reader.ReadString('\n')
+	// Bound allocation before finding the delimiter. Keep this same reader for
+	// binary payloads: a header-only LimitReader would truncate valid snapshots.
+	reader := bufio.NewReaderSize(connection, maximumControlHeaderBytes+1)
+	header, err := reader.ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) || len(header) > maximumControlHeaderBytes {
+		return sourceControlResponse{}, nil, nil, errors.New("capture source response header is too large")
+	}
 	if err != nil {
 		return sourceControlResponse{}, nil, nil, fmt.Errorf("read capture source response: %w", err)
 	}
-	if len(header) > maximumControlHeaderBytes {
-		return sourceControlResponse{}, nil, nil, errors.New("capture source response header is too large")
-	}
 	var response sourceControlResponse
-	if err := json.Unmarshal([]byte(header), &response); err != nil {
+	if err := json.Unmarshal(header, &response); err != nil {
 		return sourceControlResponse{}, nil, nil, fmt.Errorf("decode capture source response: %w", err)
 	}
 	if !response.OK {
