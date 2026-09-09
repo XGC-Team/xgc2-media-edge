@@ -14,16 +14,16 @@ if [[ -z "${package_distribution}" && -r /etc/os-release ]]; then
   package_distribution="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
 fi
 case "${package_distribution}" in
-  focal|jammy|noble) ;;
+  bionic|focal|jammy|noble) ;;
   *)
-    echo "PACKAGE_DISTRIBUTION must be focal, jammy, or noble" >&2
+    echo "PACKAGE_DISTRIBUTION must be bionic, focal, jammy, or noble" >&2
     exit 1
     ;;
 esac
 
 package_base_version="$(
-  sed -n 's/^version:[[:space:]]*//p' \
-    "${repo_root}/.xgc2/product.yml" | head -n 1
+  awk -F': *' '/^version:/ {print $2; exit}' \
+    "${repo_root}/.xgc2/product.yml"
 )"
 if [[ -z "${package_base_version}" ]]; then
   echo "package version is missing" >&2

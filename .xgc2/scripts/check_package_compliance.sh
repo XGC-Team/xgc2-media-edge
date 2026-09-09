@@ -83,7 +83,7 @@ if find . -type f \( -name '*.go' -o -name go.mod \) -print0 |
 fi
 
 grep -q '^id: xgc2-media-edge$' .xgc2/product.yml
-grep -q '^  distribution: focal,jammy,noble$' .xgc2/product.yml
+grep -q '^  distribution: bionic,focal,jammy,noble$' .xgc2/product.yml
 grep -q '^  - /usr/bin/xgc-media-edge$' .xgc2/product.yml
 grep -q '^  - /usr/lib/xgc2-media-edge/mediamtx$' .xgc2/product.yml
 grep -q '^Depends: ca-certificates$' .xgc2/scripts/build_deb.sh

@@ -153,6 +153,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - distribution: bionic
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-bionic-dev:1.0.0
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - distribution: bionic
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-bionic-dev:1.0.0
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
           - distribution: focal
             image: ghcr.io/xgc-team/xgc2-images/xgc2-build-focal-dev:1.0.0
             architecture: amd64
