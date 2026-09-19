@@ -122,7 +122,8 @@ type mediaMTXSession struct {
 
 	mu               sync.Mutex
 	keyframeAfterICE bool
-	closeOnce        sync.Once
+	closeRequested   bool
+	closed           bool
 }
 
 func NewMediaMTX(config Config, settings MediaMTXSettings) (*MediaMTXServer, error) {
@@ -450,32 +451,42 @@ func (server *MediaMTXServer) waitForMediaMTXPath(ctx context.Context, sourceID 
 	}
 }
 
-func (server *MediaMTXServer) CloseSession(sessionID string) bool {
+func (server *MediaMTXServer) CloseSession(sessionID string) (bool, error) {
 	server.mu.RLock()
 	item := server.sessions[sessionID]
 	server.mu.RUnlock()
 	if item == nil {
-		return false
+		return false, nil
 	}
-	server.closeSession(item, true)
-	return true
+	return true, server.closeSession(item, true)
 }
 
-func (server *MediaMTXServer) closeSession(item *mediaMTXSession, closeUpstream bool) {
+func (server *MediaMTXServer) closeSession(item *mediaMTXSession, closeUpstream bool) error {
 	if item == nil {
-		return
+		return nil
 	}
-	item.closeOnce.Do(func() {
-		if closeUpstream {
-			ctx, cancel := context.WithTimeout(context.Background(), mediaMTXSessionCloseTimeout)
-			_, _ = server.control.CloseWHEP(ctx, item.location)
-			cancel()
+	item.mu.Lock()
+	defer item.mu.Unlock()
+	if item.closed {
+		return nil
+	}
+	item.closeRequested = true
+	if closeUpstream {
+		ctx, cancel := context.WithTimeout(context.Background(), mediaMTXSessionCloseTimeout)
+		_, err := server.control.CloseWHEP(ctx, item.location)
+		cancel()
+		if err != nil {
+			// Keep both ownership records until deletion is confirmed. The
+			// reconciliation loop retries even after the HTTP caller goes away.
+			return fmt.Errorf("close media session: %w", err)
 		}
-		item.source.removeSession(item.id)
-		server.mu.Lock()
-		delete(server.sessions, item.id)
-		server.mu.Unlock()
-	})
+	}
+	item.closed = true
+	item.source.removeSession(item.id)
+	server.mu.Lock()
+	delete(server.sessions, item.id)
+	server.mu.Unlock()
+	return nil
 }
 
 func (source *mediaMTXSource) acquire(ctx context.Context) error {
@@ -659,9 +670,6 @@ func (server *MediaMTXServer) reconcile() {
 			}
 		}
 	}
-	if sessionErr != nil {
-		return
-	}
 	upstream := make(map[string]mtx.WebRTCSession, len(sessions))
 	upstreamByToken := make(map[string]mtx.WebRTCSession, len(sessions))
 	for _, session := range sessions {
@@ -680,6 +688,16 @@ func (server *MediaMTXServer) reconcile() {
 	}
 	server.mu.RUnlock()
 	for _, session := range local {
+		session.mu.Lock()
+		closeRequested := session.closeRequested
+		session.mu.Unlock()
+		if closeRequested {
+			_ = server.closeSession(session, true)
+			continue
+		}
+		if sessionErr != nil {
+			continue
+		}
 		actual, found := upstreamByToken[session.id]
 		if !found {
 			actual, found = upstream[session.upstreamID]
@@ -981,7 +999,9 @@ func (server *MediaMTXServer) Close() error {
 		}
 		server.mu.RUnlock()
 		for _, session := range sessions {
-			server.closeSession(session, true)
+			if err := server.closeSession(session, true); err != nil && closeErr == nil {
+				closeErr = err
+			}
 		}
 		if err := server.stopAllMediaMTXRecordings(); err != nil && closeErr == nil {
 			closeErr = err
@@ -1004,8 +1024,16 @@ func (server *MediaMTXServer) Close() error {
 			cancel()
 			source.lifecycleMu.Unlock()
 		}
-		if err := server.process.Close(); err != nil && closeErr == nil {
-			closeErr = err
+		if err := server.process.Close(); err != nil {
+			if closeErr == nil {
+				closeErr = err
+			}
+		} else {
+			// Confirmed child exit also ends every WHEP connection, including
+			// sessions whose individual DELETE was unavailable during shutdown.
+			for _, session := range sessions {
+				_ = server.closeSession(session, false)
+			}
 		}
 	})
 	return closeErr

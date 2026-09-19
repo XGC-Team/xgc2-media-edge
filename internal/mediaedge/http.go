@@ -29,7 +29,7 @@ type httpBackend interface {
 	HTTPConfig() Config
 	SourceStatuses() []SourceStatus
 	OpenSession(context.Context, string, SessionOffer) (SessionAnswer, error)
-	CloseSession(string) bool
+	CloseSession(string) (bool, error)
 	StartRecording(context.Context, string, StartRecordingRequest) (RecordingManifest, error)
 	Recordings() []RecordingManifest
 	Recording(string) (RecordingManifest, bool)
@@ -397,7 +397,12 @@ func (server *httpServer) openSession(writer http.ResponseWriter, request *http.
 }
 
 func (server *httpServer) closeSession(writer http.ResponseWriter, sessionID string) {
-	if !server.server.CloseSession(sessionID) {
+	found, err := server.server.CloseSession(sessionID)
+	if err != nil {
+		writeError(writer, http.StatusBadGateway, "media session cleanup is pending")
+		return
+	}
+	if !found {
 		writeError(writer, http.StatusNotFound, "media session was not found")
 		return
 	}

@@ -42,12 +42,12 @@ func TestMediaMTXServerPreservesMultiViewerSourceLease(t *testing.T) {
 		t.Fatalf("open second session: %v", err)
 	}
 	capture.waitFor(t, 1, activeControlRequest(true))
-	if !server.CloseSession(first.SessionID) {
-		t.Fatal("first session was not closed")
+	if found, err := server.CloseSession(first.SessionID); !found || err != nil {
+		t.Fatalf("first session was not closed: found=%v err=%v", found, err)
 	}
 	capture.expectNoMatch(t, 40*time.Millisecond, activeControlRequest(false))
-	if !server.CloseSession(second.SessionID) {
-		t.Fatal("second session was not closed")
+	if found, err := server.CloseSession(second.SessionID); !found || err != nil {
+		t.Fatalf("second session was not closed: found=%v err=%v", found, err)
 	}
 	capture.waitFor(t, 1, activeControlRequest(false))
 }
