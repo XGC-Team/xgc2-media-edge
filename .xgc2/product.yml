@@ -1,7 +1,7 @@
 schema: xgc2.product.v1
 id: xgc2-media-edge
 name: XGC2 Media Edge
-version: 0.6.0-6
+version: 0.6.0-7
 kind: toolchain-apt
 summary: XGC2 source lifecycle and scientific metadata wrapper around pinned MediaMTX
   H264/RTP, WHEP/WebRTC fanout, and stream-copy recording.
@@ -41,7 +41,7 @@ release:
   workflow: release.yml
   ci_workflow: ci.yml
   apt_versions:
-    bionic: 0.6.0-6~bionic
-    focal: 0.6.0-6~focal
-    jammy: 0.6.0-6~jammy
-    noble: 0.6.0-6~noble
+    bionic: 0.6.0-7~bionic
+    focal: 0.6.0-7~focal
+    jammy: 0.6.0-7~jammy
+    noble: 0.6.0-7~noble
