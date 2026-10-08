@@ -145,6 +145,31 @@ func TestRealPythonSourceControlAndEdgeCapture(t *testing.T) {
 	}
 	defer client.Close()
 	control := edge.sources["python-camera"].cameraControl()
+	data, status, _, err = client.Do(ctx, http.MethodGet, "/v1/media/sources/python-camera/ref", "fixture:source-ref", "", nil)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("bound source reference HTTP %d err=%v data=%s", status, err, data)
+	}
+	var sourceReference struct {
+		SourceID string          `json:"source_id"`
+		Service  xrpc.ServiceRef `json:"service_ref"`
+	}
+	if err = json.Unmarshal(data, &sourceReference); err != nil {
+		t.Fatal(err)
+	}
+	if sourceReference.SourceID != "python-camera" || sourceReference.Service.InstanceID != first || sourceReference.Service.Endpoint.Address != socket || sourceReference.Service.Service != "camera-source" {
+		t.Fatalf("edge invented a source reference: %+v", sourceReference)
+	}
+	// The calibration owner can use the returned source-owned reference directly;
+	// no inferred socket, environment bridge, or Edge RTP-only config projection.
+	sourceClient, err := httpx.New(httpx.Config{LocalTargetID: target, Service: sourceReference.Service, MaxResponseBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sourceClient.Close()
+	data, status, _, err = sourceClient.Do(ctx, http.MethodGet, "/v1/media/sources/python-camera/config", "fixture:direct-source-config", "", nil)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("source-ref direct SDK configuration HTTP %d err=%v data=%s", status, err, data)
+	}
 	configuration, _, _, err := control.call(ctx, sourceControlRequest{Operation: "config"})
 	if err != nil || configuration.ManagedSourceID != "python-camera" || configuration.DesiredRevision != 1 || configuration.AppliedRevision != 1 || configuration.Persistence != "ephemeral" || configuration.PersistedRevision != nil || configuration.Applied.RTPPort != configuration.Desired.RTPPort {
 		t.Fatalf("Python configuration revision/receipt: %+v %v", configuration, err)

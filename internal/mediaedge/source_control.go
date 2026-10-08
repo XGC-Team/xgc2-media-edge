@@ -374,6 +374,7 @@ type cameraControl struct {
 	socket, instance, sourceID string
 	mu                         sync.Mutex
 	client                     *httpx.Client
+	reference                  *xrpc.ServiceRef
 	maxCaptureBytes            int64
 	policy                     *xrpc.Policy
 }
@@ -382,6 +383,18 @@ func (control *cameraControl) boundInstance() string {
 	control.mu.Lock()
 	defer control.mu.Unlock()
 	return control.instance
+}
+
+// boundReference returns only the source-owned reference observed in discovery.
+// It keeps the bound incarnation after a source restart; SDK fencing, rather
+// than rediscovery or replay, detects that the owner is now stale.
+func (control *cameraControl) boundReference() (xrpc.ServiceRef, bool) {
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	if control.reference == nil {
+		return xrpc.ServiceRef{}, false
+	}
+	return *control.reference, true
 }
 
 func (control *cameraControl) close() {
@@ -401,7 +414,8 @@ func (control *cameraControl) transport(ctx context.Context) (*httpx.Client, err
 	if err != nil {
 		return nil, err
 	}
-	reference := xrpc.ServiceRef{TargetID: target, Service: "camera-source", APIVersion: "v1", InstanceID: control.instance, Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: control.socket}}
+	expectedInstance := control.instance
+	reference := xrpc.ServiceRef{TargetID: target, Service: "camera-source", APIVersion: "v1", Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: control.socket}}
 	build := func(ref xrpc.ServiceRef) (*httpx.Client, error) {
 		maxCaptureBytes := control.maxCaptureBytes
 		if maxCaptureBytes == 0 {
@@ -452,6 +466,9 @@ func (control *cameraControl) transport(ctx context.Context) (*httpx.Client, err
 		if reference.TargetID != target || reference.Endpoint.Kind != "unix" || reference.Endpoint.Address != control.socket || reference.Service != "camera-source" || reference.APIVersion != "v1" {
 			return nil, errors.New("camera discovery reference does not match local endpoint")
 		}
+		if expectedInstance != "" && reference.InstanceID != expectedInstance {
+			return nil, errors.New("camera discovery reference does not match configured incarnation")
+		}
 		client, err = build(reference)
 		if err != nil {
 			return nil, err
@@ -459,6 +476,7 @@ func (control *cameraControl) transport(ctx context.Context) (*httpx.Client, err
 	}
 	control.client = client
 	control.instance = reference.InstanceID
+	control.reference = &reference
 	return client, nil
 }
 

@@ -159,8 +159,15 @@ Edge never invents K from image dimensions or substitutes wall clock for missing
 source time.
 
 Local capture clients discover the edge's explicitly granted `--rpc-socket`
-(service `media-edge`), then use
-instance-bound POST `/v1/media/sources/{sourceId}/capture` with
+and bind its returned incarnation. Instance-bound GET
+`/v1/media/sources/{sourceId}/ref` returns the source-owned ServiceRef observed
+during startup discovery. Calibration clients can bind that reference with the
+official SDK and call the source's typed configuration API directly, retaining
+its calibration and publication receipts. The reference keeps its original
+incarnation if the source restarts; SDK fencing detects that stale owner.
+
+Capture clients use the same bound edge incarnation (service `media-edge`) and
+issue instance-bound POST `/v1/media/sources/{sourceId}/capture` with
 `{includeRgb:false,requestKeyframe:false,requireFresh:true}`. The result is the
 same native multipart contract. DELETE `/v1/media/snapshots/{snapshotId}`
 releases retained capture data. The former unfenced TCP snapshot API is removed.

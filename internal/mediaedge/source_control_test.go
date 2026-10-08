@@ -33,6 +33,38 @@ func TestDescribeSourceRejectsMissingFreshSnapshotCapability(t *testing.T) {
 	}
 }
 
+func TestBoundSourceReferenceRequiresDiscoveryAndPreservesItsIncarnation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	source := newCaptureControl(t)
+	defer source.close()
+	control := &cameraControl{socket: source.socket, instance: "test-instance", sourceID: "camera"}
+	defer control.close()
+	if _, observed := control.boundReference(); observed {
+		t.Fatal("bootstrap configuration was exposed as an observed reference")
+	}
+	if _, err := control.transport(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ref, observed := control.boundReference()
+	if !observed || ref.InstanceID != "test-instance" || ref.Endpoint.Address != source.socket {
+		t.Fatalf("discovery reference lost: %+v observed=%t", ref, observed)
+	}
+	ref.InstanceID = "replacement"
+	bound, _ := control.boundReference()
+	if bound.InstanceID != "test-instance" {
+		t.Fatal("caller altered the transport owner incarnation")
+	}
+	wrong := &cameraControl{socket: source.socket, instance: "other-owner", sourceID: "camera"}
+	defer wrong.close()
+	if _, err := wrong.transport(ctx); err == nil || !strings.Contains(err.Error(), "configured incarnation") {
+		t.Fatalf("configured incarnation did not fence discovery: %v", err)
+	}
+	if _, observed := wrong.boundReference(); observed {
+		t.Fatal("rejected discovery was exposed as a bound source reference")
+	}
+}
+
 type captureControl struct {
 	socket              string
 	listener            net.Listener

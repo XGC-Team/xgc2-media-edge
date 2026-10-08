@@ -56,6 +56,25 @@ func (server *MediaMTXServer) startRPC() error {
 			writeJSON(writer, http.StatusOK, map[string]any{"closing": server.isClosing(), "sources": server.SourceStatuses()})
 			return
 		}
+		if len(parts) == 5 && parts[0] == "v1" && parts[1] == "media" && parts[2] == "sources" && parts[4] == "ref" && request.Method == http.MethodGet {
+			source := server.source(parts[3])
+			if source == nil {
+				writeError(writer, http.StatusNotFound, "media source was not found")
+				return
+			}
+			if server.isClosing() {
+				writeError(writer, http.StatusServiceUnavailable, "media edge is closing")
+				return
+			}
+			ref, observed := source.cameraControl().boundReference()
+			if !observed {
+				writeError(writer, http.StatusServiceUnavailable, "media source reference has not been discovered")
+				return
+			}
+			writer.Header().Set("Cache-Control", "no-store")
+			writeJSON(writer, http.StatusOK, map[string]any{"source_id": parts[3], "service_ref": ref})
+			return
+		}
 		if len(parts) == 5 && parts[0] == "v1" && parts[1] == "media" && parts[2] == "sources" && parts[4] == "capture" && request.Method == http.MethodPost {
 			var input SnapshotCaptureRequest
 			if !decodeJSON(writer, request, &input) {
