@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/XGC-Team/xgc2-xrpc/go/httpx"
 	"io"
 	"math"
 	"net"
@@ -19,7 +20,7 @@ import (
 
 const (
 	defaultMediaMTXExecutable    = "/usr/lib/xgc2-media-edge/mediamtx"
-	defaultMediaMTXRuntimeDir    = "/run/xgc2/media-edge"
+	defaultMediaMTXRuntimeDir    = "/run/xgc2/media-edge/mediamtx"
 	defaultMediaMTXAPIAddress    = "127.0.0.1:19997"
 	defaultMediaMTXWHEPAddress   = "127.0.0.1:18889"
 	defaultMediaMTXICEUDPAddress = "0.0.0.0:18189"
@@ -27,6 +28,7 @@ const (
 	mediaMTXSessionAppearTimeout = 3 * time.Second
 	mediaMTXPathRequestTimeout   = 750 * time.Millisecond
 	mediaMTXSessionCloseTimeout  = 2 * time.Second
+	mediaMTXReconcileCloseLimit  = 4
 )
 
 // MediaMTXSettings are deployment boundaries, not camera-specific settings.
@@ -50,6 +52,7 @@ type mediaMTXControl interface {
 	ConfigureRecording(context.Context, string, mtx.RecordingSettings) error
 	OpenWHEP(context.Context, string, string, string) (mtx.WHEPSession, error)
 	CloseWHEP(context.Context, *url.URL) (bool, error)
+	KickWebRTCSession(context.Context, string) error
 }
 
 type mediaMTXProcess interface {
@@ -68,25 +71,37 @@ type MediaMTXServer struct {
 	control  mediaMTXControl
 	process  mediaMTXProcess
 
-	mu               sync.RWMutex
-	sources          map[string]*mediaMTXSource
-	sessions         map[string]*mediaMTXSession
-	recordings       map[string]*mediaMTXRecording
-	recordingHistory map[string]RecordingManifest
-	closing          bool
-	operations       sync.WaitGroup
+	mu                sync.RWMutex
+	sources           map[string]*mediaMTXSource
+	sessions          map[string]*mediaMTXSession
+	recordings        map[string]*mediaMTXRecording
+	recordingHistory  map[string]RecordingManifest
+	closing           bool
+	operations        sync.WaitGroup
+	background        sync.WaitGroup
+	activeOperations  int
+	pendingSessions   int
+	cleanupCursor     int
+	closeMu           sync.Mutex
+	closeComplete     bool
+	started           bool
+	operationsDrained chan struct{}
 
 	lifecycleContext context.Context
 	cancelLifecycle  context.CancelFunc
 	listener         net.Listener
+	rpcHost          *httpx.Host
+	instanceID       string
 	httpServer       *httpServer
-	closeOnce        sync.Once
+	stopOnce         sync.Once
 	closed           chan struct{}
 }
 
 type mediaMTXSource struct {
-	server *MediaMTXServer
-	config SourceConfig
+	controlOnce sync.Once
+	controlRPC  *cameraControl
+	server      *MediaMTXServer
+	config      SourceConfig
 
 	lifecycleMu          sync.Mutex
 	recordingLifecycleMu sync.Mutex
@@ -95,6 +110,7 @@ type mediaMTXSource struct {
 	pending              int
 	active               bool
 	deactivateUncertain  bool
+	shutdownStopped      bool
 	recordingID          string
 
 	deactivateTimer *time.Timer
@@ -109,6 +125,13 @@ type mediaMTXSource struct {
 	lastKeyframeRequestAt time.Time
 	lastRecoveryAttemptAt time.Time
 	recoveryPending       bool
+	keyframePending       bool
+	capturePending        bool
+	statusPending         bool
+	controlHealthy        bool
+	controlError          string
+	controlObservedAt     time.Time
+	nativeStatus          sourceControlResponse
 	snapshots             map[string]Snapshot
 	snapshotOrder         []string
 }
@@ -120,10 +143,13 @@ type mediaMTXSession struct {
 	source     *mediaMTXSource
 	createdAt  time.Time
 
-	mu               sync.Mutex
-	keyframeAfterICE bool
-	closeRequested   bool
-	closed           bool
+	mu                       sync.Mutex
+	keyframeAfterICE         bool
+	closeRequested           bool
+	closed                   bool
+	opening                  bool
+	observedID               string
+	creationResponseComplete bool
 }
 
 func NewMediaMTX(config Config, settings MediaMTXSettings) (*MediaMTXServer, error) {
@@ -221,6 +247,28 @@ func newMediaMTXServer(
 	control mediaMTXControl,
 	process mediaMTXProcess,
 ) *MediaMTXServer {
+	if config.MaxSessions == 0 {
+		config.MaxSessions = defaultMaxSessions
+	}
+	if config.MaxOperations == 0 {
+		config.MaxOperations = defaultMaxOperations
+	}
+	if config.RuntimePolicy != nil {
+		if limit, err := config.RuntimePolicy.Integer("HOST_MAX_IN_FLIGHT"); err == nil && limit < int64(config.MaxOperations) {
+			config.MaxOperations = int(limit)
+		}
+	}
+	if config.MaxCaptureBytes == 0 {
+		config.MaxCaptureBytes = 64 << 20
+	}
+	if config.MaxRetainedSnapshotBytes == 0 {
+		config.MaxRetainedSnapshotBytes = 128 << 20
+	}
+	if config.RuntimePolicy != nil {
+		if limit, err := config.RuntimePolicy.Integer("MAX_RESPONSE_BYTES"); err == nil && limit < config.MaxCaptureBytes {
+			config.MaxCaptureBytes = limit
+		}
+	}
 	lifecycleContext, cancelLifecycle := context.WithCancel(context.Background())
 	server := &MediaMTXServer{
 		config: config, settings: settings, control: control, process: process,
@@ -242,10 +290,43 @@ func newMediaMTXServer(
 
 // Start validates every adapter contract before MediaMTX binds ICE. This keeps
 // a typo or mismatched source from creating a superficially healthy endpoint.
-func (server *MediaMTXServer) Start() error {
+func (server *MediaMTXServer) Start() (startErr error) {
 	if server == nil || server.control == nil || server.process == nil {
 		return errors.New("MediaMTX server is not configured")
 	}
+	server.closeMu.Lock()
+	defer server.closeMu.Unlock()
+	if server.started || server.closing {
+		return errors.New("media edge may be started once per process instance")
+	}
+	server.started = true
+	childStarted := false
+	defer func() {
+		if startErr == nil {
+			return
+		}
+		server.mu.Lock()
+		server.closing = true
+		server.cancelLifecycle()
+		server.mu.Unlock()
+		if server.httpServer != nil {
+			_ = server.httpServer.close()
+		}
+		if server.rpcHost != nil {
+			_ = server.closeRPC()
+		}
+		if server.listener != nil {
+			_ = server.listener.Close()
+		}
+		for _, source := range server.sources {
+			if source.controlRPC != nil {
+				source.controlRPC.close()
+			}
+		}
+		if childStarted {
+			_ = server.process.Close()
+		}
+	}()
 	if server.config.Recording.enabled() {
 		if err := server.prepareMediaMTXRecording(); err != nil {
 			return err
@@ -258,11 +339,12 @@ func (server *MediaMTXServer) Start() error {
 	sort.Strings(sourceIDs)
 	for _, sourceID := range sourceIDs {
 		source := server.sources[sourceID]
-		described, err := describeSource(server.lifecycleContext, source.config)
+		described, err := describeSourceWith(server.lifecycleContext, source.config, source.cameraControl())
 		if err != nil {
 			return fmt.Errorf("validate media source %q: %w", source.config.ID, err)
 		}
 		source.config = described
+		source.controlHealthy = true
 		for index := range server.config.Sources {
 			if server.config.Sources[index].ID == sourceID {
 				server.config.Sources[index] = described
@@ -280,9 +362,19 @@ func (server *MediaMTXServer) Start() error {
 		server.listener = nil
 		return fmt.Errorf("start MediaMTX media kernel: %w", err)
 	}
+	childStarted = true
+	if err := server.startRPC(); err != nil {
+		_ = listener.Close()
+		server.listener = nil
+		_ = server.process.Close()
+		return err
+	}
 	server.httpServer = newHTTPServer(server)
+	if err := server.httpServer.start(listener); err != nil {
+		return err
+	}
 	go func() {
-		if err := server.httpServer.serve(listener); err != nil && !errors.Is(err, net.ErrClosed) {
+		if err := server.httpServer.host.Wait(); err != nil && !errors.Is(err, net.ErrClosed) {
 			_ = server.Close()
 		}
 	}()
@@ -334,6 +426,11 @@ func (server *MediaMTXServer) beginOperation(parent context.Context) (context.Co
 		server.mu.Unlock()
 		return nil, nil, errors.New("media edge is closing")
 	}
+	if server.activeOperations >= server.config.MaxOperations {
+		server.mu.Unlock()
+		return nil, nil, ErrMediaCapacity
+	}
+	server.activeOperations++
 	server.operations.Add(1)
 	lifecycleContext := server.lifecycleContext
 	server.mu.Unlock()
@@ -342,6 +439,9 @@ func (server *MediaMTXServer) beginOperation(parent context.Context) (context.Co
 	return operationContext, func() {
 		_ = stopLifecycleCancel()
 		cancel()
+		server.mu.Lock()
+		server.activeOperations--
+		server.mu.Unlock()
 		server.operations.Done()
 	}, nil
 }
@@ -350,6 +450,18 @@ func (server *MediaMTXServer) isClosing() bool {
 	server.mu.RLock()
 	defer server.mu.RUnlock()
 	return server.closing
+}
+
+func (server *MediaMTXServer) startBackground(work func()) bool {
+	server.mu.Lock()
+	if server.closing {
+		server.mu.Unlock()
+		return false
+	}
+	server.background.Add(1)
+	server.mu.Unlock()
+	go func() { defer server.background.Done(); work() }()
+	return true
 }
 
 func (server *MediaMTXServer) OpenSession(
@@ -369,6 +481,21 @@ func (server *MediaMTXServer) OpenSession(
 	if source == nil {
 		return SessionAnswer{}, fmt.Errorf("media source %q was not found", sourceID)
 	}
+	server.mu.Lock()
+	if len(server.sessions)+server.pendingSessions >= server.config.MaxSessions {
+		server.mu.Unlock()
+		return SessionAnswer{}, ErrMediaCapacity
+	}
+	server.pendingSessions++
+	server.mu.Unlock()
+	reserved := true
+	defer func() {
+		if reserved {
+			server.mu.Lock()
+			server.pendingSessions--
+			server.mu.Unlock()
+		}
+	}()
 	if err := source.acquire(operationContext); err != nil {
 		return SessionAnswer{}, fmt.Errorf("activate media source %q: %w", sourceID, err)
 	}
@@ -387,26 +514,41 @@ func (server *MediaMTXServer) OpenSession(
 	if err != nil {
 		return SessionAnswer{}, err
 	}
-	upstream, err := server.control.OpenWHEP(operationContext, sourceID, offer.SDP, sessionID)
-	if err != nil {
-		return SessionAnswer{}, fmt.Errorf("open MediaMTX WHEP session: %w", err)
-	}
-	item := &mediaMTXSession{
-		id: sessionID, upstreamID: pathBase(upstream.Location.Path), location: upstream.Location,
-		source: source, createdAt: time.Now(),
-	}
+	item := &mediaMTXSession{id: sessionID, source: source, createdAt: time.Now(), opening: true}
 	server.mu.Lock()
 	if server.closing {
 		server.mu.Unlock()
-		closeContext, cancel := context.WithTimeout(context.Background(), mediaMTXSessionCloseTimeout)
-		_, _ = server.control.CloseWHEP(closeContext, upstream.Location)
-		cancel()
 		return SessionAnswer{}, errors.New("media edge is closing")
 	}
 	server.sessions[sessionID] = item
+	server.pendingSessions--
+	reserved = false
 	server.mu.Unlock()
 	source.releasePending(sessionID)
 	pending = false
+	// Own the token before native WHEP dispatch. A created session whose
+	// response is lost still owns its bounded slot and source demand.
+	upstream, err := server.control.OpenWHEP(operationContext, sourceID, offer.SDP, sessionID)
+	item.mu.Lock()
+	item.opening = false
+	if err != nil {
+		item.closeRequested = true
+		var received *mtx.HTTPError
+		item.creationResponseComplete = errors.As(err, &received)
+		item.mu.Unlock()
+		return SessionAnswer{}, fmt.Errorf("open MediaMTX WHEP session: %w", err)
+	}
+	item.location = upstream.Location
+	item.upstreamID = pathBase(upstream.Location.Path)
+	if server.isClosing() {
+		item.closeRequested = true
+	}
+	closing := item.closeRequested
+	item.mu.Unlock()
+	if closing {
+		_ = server.closeSession(item, true)
+		return SessionAnswer{}, errors.New("media edge is closing")
+	}
 	// A short GOP already guarantees bounded startup. This request accelerates
 	// first paint; reconcile sends one more after ICE is actually established.
 	source.requestKeyframeAsync(true)
@@ -462,6 +604,10 @@ func (server *MediaMTXServer) CloseSession(sessionID string) (bool, error) {
 }
 
 func (server *MediaMTXServer) closeSession(item *mediaMTXSession, closeUpstream bool) error {
+	return server.closeSessionContext(context.Background(), item, closeUpstream)
+}
+
+func (server *MediaMTXServer) closeSessionContext(parent context.Context, item *mediaMTXSession, closeUpstream bool) error {
 	if item == nil {
 		return nil
 	}
@@ -471,9 +617,17 @@ func (server *MediaMTXServer) closeSession(item *mediaMTXSession, closeUpstream 
 		return nil
 	}
 	item.closeRequested = true
+	if item.opening && closeUpstream {
+		return errors.New("media session negotiation is still in progress")
+	}
 	if closeUpstream {
-		ctx, cancel := context.WithTimeout(context.Background(), mediaMTXSessionCloseTimeout)
-		_, err := server.control.CloseWHEP(ctx, item.location)
+		ctx, cancel := context.WithTimeout(parent, mediaMTXSessionCloseTimeout)
+		var err error
+		if item.location != nil {
+			_, err = server.control.CloseWHEP(ctx, item.location)
+		} else {
+			err = server.closeUnknownSession(ctx, item)
+		}
 		cancel()
 		if err != nil {
 			// Keep both ownership records until deletion is confirmed. The
@@ -487,6 +641,43 @@ func (server *MediaMTXServer) closeSession(item *mediaMTXSession, closeUpstream 
 	delete(server.sessions, item.id)
 	server.mu.Unlock()
 	return nil
+}
+
+func (server *MediaMTXServer) closeUnknownSession(ctx context.Context, item *mediaMTXSession) error {
+	sessions, err := server.control.WebRTCSessions(ctx)
+	if err != nil {
+		return err
+	}
+	var matched *mtx.WebRTCSession
+	for _, actual := range sessions {
+		query, err := url.ParseQuery(strings.TrimPrefix(actual.Query, "?"))
+		if err != nil {
+			continue
+		}
+		if len(query["xgcSession"]) != 1 || query.Get("xgcSession") != item.id {
+			continue
+		}
+		if actual.Path != item.source.config.ID || actual.State != "read" {
+			return errors.New("uncertain WHEP session identity mismatch")
+		}
+		if matched != nil || (item.observedID != "" && actual.ID != item.observedID) {
+			return errors.New("uncertain WHEP session token is not unique")
+		}
+		candidate := actual
+		matched = &candidate
+	}
+	if matched == nil {
+		if item.observedID != "" || item.creationResponseComplete {
+			// This token's native creation was previously observed. Complete
+			// inventory absence confirms deletion even if the kick reply was lost.
+			// A full native HTTP failure response also finishes creation before
+			// the sequential native inventory owner can answer this probe.
+			return nil
+		}
+		return errors.New("WHEP creation outcome is still unknown; ownership retained")
+	}
+	item.observedID = matched.ID
+	return server.control.KickWebRTCSession(ctx, matched.ID)
 }
 
 func (source *mediaMTXSource) acquire(ctx context.Context) error {
@@ -503,13 +694,14 @@ func (source *mediaMTXSource) acquire(ctx context.Context) error {
 		return nil
 	}
 	source.mu.Unlock()
-	active := true
-	if _, _, _, err := callSourceControl(ctx, source.config.ControlSocket, sourceControlRequest{
-		Operation: "set-active", Active: &active,
+	if _, _, _, err := source.cameraControl().call(ctx, sourceControlRequest{
+		Operation: "start",
 	}); err != nil {
 		source.mu.Lock()
 		source.pending--
-		unused := source.active && !source.hasConsumersLocked()
+		source.active = true // a lost reply can follow applied activation
+		source.deactivateUncertain = true
+		unused := !source.hasConsumersLocked()
 		source.mu.Unlock()
 		if unused {
 			source.scheduleDeactivate()
@@ -602,9 +794,8 @@ func (source *mediaMTXSource) deactivateIfUnused(epoch uint64) {
 	source.mu.Unlock()
 	ctx, cancel := context.WithTimeout(source.server.lifecycleContext, sourceControlRequestTimeout)
 	defer cancel()
-	active := false
-	_, _, _, err := callSourceControl(ctx, source.config.ControlSocket, sourceControlRequest{
-		Operation: "set-active", Active: &active,
+	_, _, _, err := source.cameraControl().call(ctx, sourceControlRequest{
+		Operation: "stop",
 	})
 	source.mu.Lock()
 	defer source.mu.Unlock()
@@ -626,22 +817,31 @@ func (source *mediaMTXSource) deactivateIfUnused(epoch uint64) {
 }
 
 func (source *mediaMTXSource) requestKeyframeAsync(force bool) {
+	if !source.config.KeyframeRequestSupported {
+		return
+	}
 	now := time.Now()
 	source.mu.Lock()
-	if !source.active || (!force && !source.lastKeyframeRequestAt.IsZero() &&
+	if !source.active || source.keyframePending || (!force && !source.lastKeyframeRequestAt.IsZero() &&
 		now.Sub(source.lastKeyframeRequestAt) < keyframeRequestMinimumInterval) {
 		source.mu.Unlock()
 		return
 	}
 	source.lastKeyframeRequestAt = now
+	source.keyframePending = true
 	source.mu.Unlock()
-	go func() {
+	if !source.server.startBackground(func() {
+		defer func() { source.mu.Lock(); source.keyframePending = false; source.mu.Unlock() }()
 		ctx, cancel := context.WithTimeout(source.server.lifecycleContext, sourceControlRequestTimeout)
 		defer cancel()
-		_, _, _, _ = callSourceControl(ctx, source.config.ControlSocket, sourceControlRequest{
+		_, _, _, _ = source.cameraControl().call(ctx, sourceControlRequest{
 			Operation: "request-keyframe",
 		})
-	}()
+	}) {
+		source.mu.Lock()
+		source.keyframePending = false
+		source.mu.Unlock()
+	}
 }
 
 func (server *MediaMTXServer) reconcileLoop() {
@@ -658,16 +858,36 @@ func (server *MediaMTXServer) reconcileLoop() {
 }
 
 func (server *MediaMTXServer) reconcile() {
+	for _, source := range server.sources {
+		source.pollStatusAsync()
+	}
 	ctx, cancel := context.WithTimeout(server.lifecycleContext, mediaMTXPathRequestTimeout)
 	paths, pathErr := server.control.Paths(ctx)
 	sessions, sessionErr := server.control.WebRTCSessions(ctx)
 	cancel()
 	now := time.Now()
 	if pathErr == nil {
+		observed := make(map[string]bool, len(paths))
 		for _, status := range paths {
 			if source := server.source(status.Name); source != nil {
+				observed[status.Name] = true
 				source.observePath(now, status)
 			}
+		}
+		for sourceID, source := range server.sources {
+			if !observed[sourceID] {
+				source.mu.Lock()
+				source.available = false
+				source.online = false
+				source.mu.Unlock()
+			}
+		}
+	} else {
+		for _, source := range server.sources {
+			source.mu.Lock()
+			source.available = false
+			source.online = false
+			source.mu.Unlock()
 		}
 	}
 	upstream := make(map[string]mtx.WebRTCSession, len(sessions))
@@ -687,12 +907,33 @@ func (server *MediaMTXServer) reconcile() {
 		local = append(local, session)
 	}
 	server.mu.RUnlock()
-	for _, session := range local {
+	sort.Slice(local, func(left, right int) bool { return local[left].id < local[right].id })
+	server.mu.Lock()
+	start := 0
+	if len(local) != 0 {
+		start = server.cleanupCursor % len(local)
+	}
+	server.mu.Unlock()
+	cleanupContext, cleanupCancel := context.WithTimeout(server.lifecycleContext, mediaMTXSessionCloseTimeout)
+	defer cleanupCancel()
+	cleanupAttempts := 0
+	for index := range local {
+		session := local[(start+index)%len(local)]
 		session.mu.Lock()
 		closeRequested := session.closeRequested
+		opening := session.opening
 		session.mu.Unlock()
+		if opening {
+			continue
+		}
 		if closeRequested {
-			_ = server.closeSession(session, true)
+			if cleanupAttempts < mediaMTXReconcileCloseLimit && cleanupContext.Err() == nil {
+				cleanupAttempts++
+				server.mu.Lock()
+				server.cleanupCursor = (start + index + 1) % len(local)
+				server.mu.Unlock()
+				_ = server.closeSessionContext(cleanupContext, session, true)
+			}
 			continue
 		}
 		if sessionErr != nil {
@@ -709,7 +950,9 @@ func (server *MediaMTXServer) reconcile() {
 			continue
 		}
 		if actual.Path != session.source.config.ID || actual.State != "read" {
-			server.closeSession(session, true)
+			session.mu.Lock()
+			session.closeRequested = true
+			session.mu.Unlock()
 			continue
 		}
 		if actual.PeerConnectionEstablished {
@@ -752,7 +995,11 @@ func (source *mediaMTXSource) observePath(now time.Time, status mtx.PathStatus) 
 		source.server.markMediaMTXRecordingActive(recordingID, now)
 	}
 	if recover {
-		go source.recover(recoveryEpoch)
+		if !source.server.startBackground(func() { source.recover(recoveryEpoch) }) {
+			source.mu.Lock()
+			source.recoveryPending = false
+			source.mu.Unlock()
+		}
 	}
 }
 
@@ -777,9 +1024,8 @@ func (source *mediaMTXSource) recover(epoch uint64) {
 	}
 	ctx, cancel := context.WithTimeout(source.server.lifecycleContext, sourceControlRequestTimeout)
 	defer cancel()
-	active := true
-	if _, _, _, err := callSourceControl(ctx, source.config.ControlSocket, sourceControlRequest{
-		Operation: "set-active", Active: &active,
+	if _, _, _, err := source.cameraControl().call(ctx, sourceControlRequest{
+		Operation: "start",
 	}); err == nil {
 		source.requestKeyframeAsync(true)
 	}
@@ -801,11 +1047,55 @@ func (server *MediaMTXServer) SourceStatuses() []SourceStatus {
 			LastPacketAt: source.lastPacketAt.UTC(), BytesReceived: source.inboundBytes,
 			FramesInError: source.framesInError, Width: source.config.Width, Height: source.config.Height,
 			FPS: source.config.FPS, FrameID: source.config.FrameID,
+			StateUncertain: source.deactivateUncertain, ControlHealthy: source.controlHealthy,
+			ControlError: source.controlError, ControlObservedAt: source.controlObservedAt,
+			ControlInstanceID: source.cameraControl().boundInstance(), NativeState: source.nativeStatus.State,
+			NativeAppliedActive: source.nativeStatus.AppliedActive, ConfigurationRevision: source.nativeStatus.ConfigurationRevision,
 		})
 		source.mu.Unlock()
 	}
 	sort.Slice(statuses, func(left, right int) bool { return statuses[left].ID < statuses[right].ID })
 	return statuses
+}
+
+func (source *mediaMTXSource) pollStatusAsync() {
+	if source.server.isClosing() {
+		return
+	}
+	source.mu.Lock()
+	if source.statusPending {
+		source.mu.Unlock()
+		return
+	}
+	source.statusPending = true
+	source.mu.Unlock()
+	if !source.server.startBackground(func() {
+		response, _, _, err := source.cameraControl().call(source.server.lifecycleContext, sourceControlRequest{Operation: "status"})
+		source.mu.Lock()
+		defer source.mu.Unlock()
+		source.statusPending = false
+		source.controlObservedAt = time.Now().UTC()
+		if err != nil {
+			source.controlHealthy = false
+			source.controlError = err.Error()
+			if len(source.controlError) > 512 {
+				source.controlError = source.controlError[:512]
+			}
+			return
+		}
+		if response.ManagedSourceID != source.config.ID {
+			source.controlHealthy = false
+			source.controlError = "source status identity mismatch"
+			return
+		}
+		source.controlHealthy = true
+		source.controlError = ""
+		source.nativeStatus = response
+	}) {
+		source.mu.Lock()
+		source.statusPending = false
+		source.mu.Unlock()
+	}
 }
 
 func (server *MediaMTXServer) CaptureSnapshot(
@@ -822,6 +1112,14 @@ func (server *MediaMTXServer) CaptureSnapshot(
 	if source == nil {
 		return Snapshot{}, fmt.Errorf("media source %q was not found", sourceID)
 	}
+	source.mu.Lock()
+	if source.capturePending {
+		source.mu.Unlock()
+		return Snapshot{}, ErrMediaCapacity
+	}
+	source.capturePending = true
+	source.mu.Unlock()
+	defer func() { source.mu.Lock(); source.capturePending = false; source.mu.Unlock() }()
 	if err := source.acquire(operationContext); err != nil {
 		return Snapshot{}, fmt.Errorf("activate media source %q: %w", sourceID, err)
 	}
@@ -830,18 +1128,18 @@ func (server *MediaMTXServer) CaptureSnapshot(
 	if err != nil {
 		return Snapshot{}, err
 	}
-	response, jpeg, rgb, err := callSourceControl(operationContext, source.config.ControlSocket, sourceControlRequest{
-		Operation: "snapshot", SnapshotID: id, IncludeRGB: request.IncludeRGB,
+	response, jpeg, rgb, err := source.cameraControl().call(operationContext, sourceControlRequest{
+		Operation: "capture", SnapshotID: id, IncludeRGB: request.IncludeRGB,
 		RequestKeyframe: request.RequestKeyframe, RequireFresh: request.RequireFresh,
 	})
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("capture source snapshot: %w", err)
 	}
-	if response.SnapshotID != "" && response.SnapshotID != id {
+	if response.SourceID != source.config.ID || response.SnapshotID != id || response.Sequence == 0 {
 		return Snapshot{}, errors.New("capture source returned a mismatched snapshot ID")
 	}
 	if response.Width != source.config.Width || response.Height != source.config.Height ||
-		response.PixelFormat != "rgb8" {
+		response.PixelFormat != "rgb8" || response.FrameID != source.config.FrameID {
 		return Snapshot{}, errors.New("capture source snapshot metadata does not match the media source")
 	}
 	if request.includeRGB() {
@@ -851,8 +1149,27 @@ func (server *MediaMTXServer) CaptureSnapshot(
 	} else if response.RGBBytes != 0 || len(rgb) != 0 {
 		return Snapshot{}, errors.New("JPEG-only capture source returned forbidden RGB")
 	}
-	if len(response.CameraMatrix) != 9 || len(response.Distortion) < 4 {
-		return Snapshot{}, errors.New("capture source snapshot does not contain camera intrinsics")
+	calibrationState := response.CalibrationState
+	if calibrationState == "" {
+		if len(response.CameraMatrix) == 0 && len(response.Distortion) == 0 {
+			calibrationState = "unavailable"
+		} else {
+			calibrationState = "available"
+		}
+	}
+	if calibrationState != "available" && calibrationState != "unavailable" {
+		return Snapshot{}, errors.New("capture source calibration state is invalid")
+	}
+	if calibrationState == "available" && (len(response.CameraMatrix) != 9 || len(response.Distortion) < 4 || len(response.Distortion) > 16) {
+		return Snapshot{}, errors.New("capture source camera intrinsics are invalid")
+	}
+	if calibrationState == "unavailable" && (len(response.CameraMatrix) != 0 || len(response.Distortion) != 0) {
+		return Snapshot{}, errors.New("unavailable source calibration must omit intrinsics")
+	}
+	for _, value := range append(append([]float64(nil), response.CameraMatrix...), response.Distortion...) {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return Snapshot{}, errors.New("capture source camera intrinsics are non-finite")
+		}
 	}
 	jpegBackend := strings.TrimSpace(response.JPEGBackend)
 	jpegReadback := strings.TrimSpace(response.JPEGReadback)
@@ -876,10 +1193,8 @@ func (server *MediaMTXServer) CaptureSnapshot(
 		JPEGEncodeMillis:   response.JPEGEncodeMillis,
 		Distortion:         append([]float64(nil), response.Distortion...),
 		RenderPose:         cloneSnapshotRenderPose(response.RenderPose), PoseFrameID: response.PoseFrameID,
+		CalibrationState: calibrationState, Sequence: response.Sequence,
 		ExpiresAt: time.Now().Add(server.config.SnapshotTTL),
-	}
-	if snapshot.FrameID == "" {
-		snapshot.FrameID = source.config.FrameID
 	}
 	switch snapshot.TimestampClockDomain {
 	case "simulation", "system_realtime", "monotonic", "device", "unknown":
@@ -891,30 +1206,82 @@ func (server *MediaMTXServer) CaptureSnapshot(
 	if snapshot.TimestampNanoseconds < 0 {
 		return Snapshot{}, errors.New("capture source snapshot returned a negative source timestamp")
 	}
-	if snapshot.TimestampClockDomain == "unknown" && snapshot.TimestampNanoseconds == 0 {
-		snapshot.TimestampNanoseconds = time.Now().UnixNano()
-		snapshot.TimestampClockDomain = "system_realtime"
+	if err := source.storeSnapshot(snapshot); err != nil {
+		return Snapshot{}, err
 	}
-	source.storeSnapshot(snapshot)
 	return snapshot, nil
 }
 
-func (source *mediaMTXSource) storeSnapshot(snapshot Snapshot) {
-	source.mu.Lock()
-	defer source.mu.Unlock()
-	now := time.Now()
-	for id, current := range source.snapshots {
-		if !current.ExpiresAt.After(now) {
-			delete(source.snapshots, id)
+func (source *mediaMTXSource) storeSnapshot(snapshot Snapshot) error {
+	server := source.server
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	bytes := int64(len(snapshot.JPEG)) + int64(len(snapshot.RGB))
+	if bytes > server.config.MaxRetainedSnapshotBytes {
+		return ErrMediaCapacity
+	}
+	// Retention has a product-wide byte budget and a two-item cap per source.
+	// All snapshot mutations follow server -> source lock order.
+	for _, item := range server.sources {
+		item.mu.Lock()
+	}
+	defer func() {
+		for _, item := range server.sources {
+			item.mu.Unlock()
 		}
+	}()
+	now := time.Now()
+	var retained int64
+	for _, item := range server.sources {
+		order := item.snapshotOrder[:0]
+		for _, id := range item.snapshotOrder {
+			current, found := item.snapshots[id]
+			if !found {
+				continue
+			}
+			if !current.ExpiresAt.After(now) {
+				delete(item.snapshots, id)
+				continue
+			}
+			order = append(order, id)
+			retained += int64(len(current.JPEG)) + int64(len(current.RGB))
+		}
+		item.snapshotOrder = order
 	}
 	source.snapshots[snapshot.ID] = snapshot
 	source.snapshotOrder = append(source.snapshotOrder, snapshot.ID)
-	for len(source.snapshotOrder) > maximumSnapshots {
-		oldest := source.snapshotOrder[0]
-		source.snapshotOrder = source.snapshotOrder[1:]
-		delete(source.snapshots, oldest)
+	retained += bytes
+	remove := func(item *mediaMTXSource, id string) {
+		current := item.snapshots[id]
+		retained -= int64(len(current.JPEG)) + int64(len(current.RGB))
+		delete(item.snapshots, id)
+		for index, key := range item.snapshotOrder {
+			if key == id {
+				item.snapshotOrder = append(item.snapshotOrder[:index], item.snapshotOrder[index+1:]...)
+				break
+			}
+		}
 	}
+	for len(source.snapshotOrder) > maximumSnapshots {
+		remove(source, source.snapshotOrder[0])
+	}
+	for retained > server.config.MaxRetainedSnapshotBytes {
+		var oldestSource *mediaMTXSource
+		var oldest Snapshot
+		for _, item := range server.sources {
+			for _, current := range item.snapshots {
+				if current.ID != snapshot.ID && (oldestSource == nil || current.ExpiresAt.Before(oldest.ExpiresAt)) {
+					oldestSource = item
+					oldest = current
+				}
+			}
+		}
+		if oldestSource == nil {
+			return ErrMediaCapacity
+		}
+		remove(oldestSource, oldest.ID)
+	}
+	return nil
 }
 
 func (server *MediaMTXServer) Snapshot(snapshotID string) (Snapshot, bool) {
@@ -972,70 +1339,116 @@ func (server *MediaMTXServer) Close() error {
 	if server == nil {
 		return nil
 	}
-	var closeErr error
-	server.closeOnce.Do(func() {
+	server.closeMu.Lock()
+	defer server.closeMu.Unlock()
+	if server.closeComplete {
+		return nil
+	}
+	server.stopOnce.Do(func() {
 		server.mu.Lock()
 		server.closing = true
 		server.cancelLifecycle()
 		server.mu.Unlock()
 		close(server.closed)
-		if server.httpServer != nil {
-			closeErr = server.httpServer.close()
-		}
-		if server.listener != nil {
-			if err := server.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) && closeErr == nil {
-				closeErr = err
-			}
-		}
-		server.operations.Wait()
-		server.mu.RLock()
-		sessions := make([]*mediaMTXSession, 0, len(server.sessions))
-		for _, session := range server.sessions {
-			sessions = append(sessions, session)
-		}
-		sources := make([]*mediaMTXSource, 0, len(server.sources))
-		for _, source := range server.sources {
-			sources = append(sources, source)
-		}
-		server.mu.RUnlock()
-		for _, session := range sessions {
-			if err := server.closeSession(session, true); err != nil && closeErr == nil {
-				closeErr = err
-			}
-		}
-		if err := server.stopAllMediaMTXRecordings(); err != nil && closeErr == nil {
-			closeErr = err
-		}
-		for _, source := range sources {
-			source.lifecycleMu.Lock()
-			source.mu.Lock()
-			source.cancelDeactivateTimerLocked()
-			source.active = false
-			source.activeSince = time.Time{}
-			source.lastRecoveryAttemptAt = time.Time{}
-			source.mu.Unlock()
-			ctx, cancel := context.WithTimeout(context.Background(), sourceControlRequestTimeout)
-			active := false
-			if _, _, _, err := callSourceControl(ctx, source.config.ControlSocket, sourceControlRequest{
-				Operation: "set-active", Active: &active,
-			}); err != nil && closeErr == nil {
-				closeErr = fmt.Errorf("deactivate media source %q: %w", source.config.ID, err)
-			}
-			cancel()
-			source.lifecycleMu.Unlock()
-		}
-		if err := server.process.Close(); err != nil {
-			if closeErr == nil {
-				closeErr = err
-			}
-		} else {
-			// Confirmed child exit also ends every WHEP connection, including
-			// sessions whose individual DELETE was unavailable during shutdown.
-			for _, session := range sessions {
-				_ = server.closeSession(session, false)
-			}
-		}
+		server.operationsDrained = make(chan struct{})
+		go func() { server.operations.Wait(); server.background.Wait(); close(server.operationsDrained) }()
 	})
+	var failures []error
+	if server.httpServer != nil {
+		if err := server.httpServer.close(); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	if server.rpcHost != nil {
+		if err := server.closeRPC(); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	if server.listener != nil {
+		_ = server.listener.Close()
+	}
+	select {
+	case <-server.operationsDrained:
+	case <-time.After(server.shutdownTimeout()):
+		return errors.Join(append(failures, errors.New("media operations have not drained"))...)
+	}
+	server.mu.RLock()
+	sessions := make([]*mediaMTXSession, 0, len(server.sessions))
+	for _, session := range server.sessions {
+		sessions = append(sessions, session)
+	}
+	sources := make([]*mediaMTXSource, 0, len(server.sources))
+	for _, source := range server.sources {
+		sources = append(sources, source)
+	}
+	server.mu.RUnlock()
+	var sessionFailures []error
+	cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), server.shutdownTimeout())
+	for _, session := range sessions {
+		if cleanupContext.Err() != nil {
+			sessionFailures = append(sessionFailures, cleanupContext.Err())
+			break
+		}
+		if err := server.closeSessionContext(cleanupContext, session, true); err != nil {
+			sessionFailures = append(sessionFailures, err)
+		}
+	}
+	cleanupCancel()
+	if err := server.stopAllMediaMTXRecordings(); err != nil {
+		failures = append(failures, err)
+	}
+	for _, source := range sources {
+		source.lifecycleMu.Lock()
+		source.mu.Lock()
+		source.cancelDeactivateTimerLocked()
+		stopped := source.shutdownStopped
+		if !source.active && !source.deactivateUncertain && !source.hasConsumersLocked() {
+			stopped = true
+			source.shutdownStopped = true
+		}
+		source.mu.Unlock()
+		if !stopped {
+			ctx, cancel := context.WithTimeout(context.Background(), sourceControlRequestTimeout)
+			_, _, _, err := source.cameraControl().call(ctx, sourceControlRequest{Operation: "stop"})
+			cancel()
+			source.mu.Lock()
+			if err != nil {
+				source.deactivateUncertain = true
+				failures = append(failures, fmt.Errorf("deactivate media source %q: %w", source.config.ID, err))
+			} else {
+				source.shutdownStopped = true
+				source.active = false
+				source.deactivateUncertain = false
+				source.activeSince = time.Time{}
+				source.lastRecoveryAttemptAt = time.Time{}
+			}
+			source.mu.Unlock()
+			if err == nil {
+				source.cameraControl().close()
+			}
+		}
+		if stopped {
+			source.cameraControl().close()
+		}
+		source.lifecycleMu.Unlock()
+	}
+	if err := server.process.Close(); err != nil {
+		failures = append(failures, err)
+		failures = append(failures, sessionFailures...)
+	} else {
+		// Confirmed child exit ends every WHEP connection even if an individual
+		// DELETE failed. A source stop failure remains independently retryable.
+		for _, session := range sessions {
+			_ = server.closeSession(session, false)
+		}
+	}
+	if closer, ok := server.control.(io.Closer); ok && len(failures) == 0 {
+		if err := closer.Close(); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	closeErr := errors.Join(failures...)
+	server.closeComplete = closeErr == nil
 	return closeErr
 }
 
@@ -1056,3 +1469,10 @@ func filepathJoinSlash(elements ...string) string {
 }
 
 var _ httpBackend = (*MediaMTXServer)(nil)
+
+func (source *mediaMTXSource) cameraControl() *cameraControl {
+	source.controlOnce.Do(func() {
+		source.controlRPC = &cameraControl{socket: source.config.ControlSocket, instance: source.config.ControlInstanceID, sourceID: source.config.ID, maxCaptureBytes: source.server.config.MaxCaptureBytes, policy: source.server.config.RuntimePolicy}
+	})
+	return source.controlRPC
+}

@@ -17,6 +17,7 @@ import (
 const (
 	maximumAPIResponseBytes = 2 << 20
 	maximumSDPBytes         = 256 << 10
+	maximumSessionInventory = 1024
 )
 
 // Client is the loopback-only XGC control boundary to MediaMTX. Browser media
@@ -98,13 +99,16 @@ func NewClient(apiBase string, whepBase string) (*Client, error) {
 	return &Client{
 		apiBase: api, whepBase: whep,
 		http: &http.Client{
-			Timeout: 15 * time.Second,
+			Transport: &http.Transport{Proxy: nil, MaxConnsPerHost: 16, MaxIdleConns: 8, MaxIdleConnsPerHost: 4, IdleConnTimeout: 30 * time.Second, MaxResponseHeaderBytes: 16 << 10, DisableCompression: true},
+			Timeout:   15 * time.Second,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return errors.New("MediaMTX redirects are not allowed")
 			},
 		},
 	}, nil
 }
+
+func (client *Client) Close() error { client.http.CloseIdleConnections(); return nil }
 
 func parseLoopbackHTTPBase(value string) (*url.URL, error) {
 	parsed, err := url.Parse(strings.TrimSpace(value))
@@ -148,12 +152,29 @@ func (client *Client) Path(ctx context.Context, name string) (PathStatus, error)
 
 func (client *Client) WebRTCSessions(ctx context.Context) ([]WebRTCSession, error) {
 	var response struct {
-		Items []WebRTCSession `json:"items"`
+		Items     []WebRTCSession `json:"items"`
+		ItemCount *int            `json:"itemCount"`
+		PageCount *int            `json:"pageCount"`
 	}
-	if err := client.apiJSON(ctx, http.MethodGet, "/v3/webrtcsessions/list", nil, &response); err != nil {
+	if err := client.apiJSON(ctx, http.MethodGet, "/v3/webrtcsessions/list?itemsPerPage=1024", nil, &response); err != nil {
 		return nil, err
 	}
+	if len(response.Items) > maximumSessionInventory || response.ItemCount == nil || response.PageCount == nil || *response.ItemCount != len(response.Items) || *response.PageCount > 1 || *response.PageCount < 0 {
+		return nil, errors.New("MediaMTX session inventory is incomplete or exceeds 1024 sessions")
+	}
 	return response.Items, nil
+}
+
+func (client *Client) KickWebRTCSession(ctx context.Context, id string) error {
+	if !pathName.MatchString(id) {
+		return errors.New("MediaMTX session ID is invalid")
+	}
+	err := client.apiJSON(ctx, http.MethodPost, "/v3/webrtcsessions/kick/"+id, nil, nil)
+	var status *HTTPError
+	if errors.As(err, &status) && status.Status == http.StatusNotFound {
+		return nil
+	}
+	return err
 }
 
 func (client *Client) SetRecording(ctx context.Context, name string, enabled bool) error {
@@ -204,7 +225,7 @@ func (client *Client) OpenWHEP(
 	query := endpoint.Query()
 	query.Set("xgcSession", sessionToken)
 	endpoint.RawQuery = query.Encode()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), strings.NewReader(offerSDP))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), struct{ io.Reader }{strings.NewReader(offerSDP)})
 	if err != nil {
 		return WHEPSession{}, err
 	}
@@ -271,7 +292,9 @@ func (client *Client) apiJSON(ctx context.Context, method string, path string, i
 		body = bytes.NewReader(encoded)
 	}
 	endpoint := *client.apiBase
-	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
+	requestPath, query, _ := strings.Cut(path, "?")
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + requestPath
+	endpoint.RawQuery = query
 	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
 	if err != nil {
 		return err
@@ -303,7 +326,9 @@ func (client *Client) apiJSON(ctx context.Context, method string, path string, i
 
 func (client *Client) resolveWHEP(path string) *url.URL {
 	endpoint := *client.whepBase
-	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
+	requestPath, query, _ := strings.Cut(path, "?")
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + requestPath
+	endpoint.RawQuery = query
 	return &endpoint
 }
 

@@ -56,7 +56,7 @@ func TestCaptureSnapshotPassesThroughOptionalSourceRenderPose(t *testing.T) {
 		t.Fatalf("snapshot JPEG diagnostics were not preserved: %+v", snapshot)
 	}
 	capture.waitFor(t, 1, func(request sourceControlRequest) bool {
-		return request.Operation == "snapshot" && request.IncludeRGB != nil && !*request.IncludeRGB &&
+		return request.Operation == "capture" && request.IncludeRGB != nil && !*request.IncludeRGB &&
 			request.RequestKeyframe != nil && !*request.RequestKeyframe &&
 			request.RequireFresh != nil && *request.RequireFresh
 	})

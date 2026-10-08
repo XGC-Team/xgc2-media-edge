@@ -5,6 +5,7 @@ set -euo pipefail
 dpkg -s xgc2-media-edge >/dev/null
 test -x /usr/bin/xgc-media-edge
 test -x /usr/lib/xgc2-media-edge/mediamtx
+test -x /usr/lib/xgc2-media-edge/prepare-runtime
 
 version="$(xgc-media-edge --version)"
 case "${version}" in
@@ -18,6 +19,7 @@ help="$(xgc-media-edge --help 2>&1)"
 grep -q -- '-control-address' <<<"${help}"
 grep -q -- '127.0.0.1:18090' <<<"${help}"
 grep -q -- '-sources-config' <<<"${help}"
+grep -q -- '-rpc-socket' <<<"${help}"
 grep -q -- '-mediamtx-executable' <<<"${help}"
 grep -q -- '0.0.0.0:18189' <<<"${help}"
 if grep -Eq -- '-source-id|-rtp-listen-address|-source-control-socket|-width|-height|-fps|-frame-id|-transport|legacy-pion|recording-ffmpeg' <<<"${help}"; then

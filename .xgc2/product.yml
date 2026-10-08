@@ -13,6 +13,7 @@ apt:
   - xgc2-media-edge
   depends:
   - ca-certificates
+  - python3
 usage:
   install: 'sudo apt update
 
@@ -35,6 +36,7 @@ ownership:
   paths:
   - /usr/bin/xgc-media-edge
   - /usr/lib/xgc2-media-edge/mediamtx
+  - /usr/lib/xgc2-media-edge/prepare-runtime
 release:
   repository: lxk36/xgc2-media-edge
   ref: main

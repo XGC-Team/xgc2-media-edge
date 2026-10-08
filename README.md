@@ -37,7 +37,7 @@ Conforming H264 capture source
 The HTTP listener defaults to `127.0.0.1:18090`. A deployment may explicitly
 bind it to a target interface or `0.0.0.0` so a browser can reach it. RTP ingress
 is different: it is always loopback-only and cannot be relaxed. The process has
-no Core URL, performs no discovery, and never dials a ground station. A
+no Core URL and never dials a ground station. It discovers only configured local source incarnations. A
 browser-originated offer is proxied to MediaMTX WHEP. MediaMTX owns RTP
 parsing, fanout, ICE and SRTP; the fixed direct ICE listener is
 `0.0.0.0:18189/udp` unless explicitly configured otherwise.
@@ -106,9 +106,8 @@ The remotely reachable HTTP surface is deliberately small:
 The source-scoped session endpoints are the stable XGC product contract. They
 are a thin WHEP proxy and do not implement a second WebRTC stack.
 
-HTTP snapshot creation and retrieval retain their existing paths but reject
-every non-loopback client. Recording control is also loopback-only and is
-documented below. Live video is never served as HTTP pixels: there is no MJPEG,
+Capture uses the private instance-bound XRPC endpoint described below.
+Recording control remains loopback-only and is documented below. Live video is never served as HTTP pixels: there is no MJPEG,
 HLS, JPEG polling, discovery, SSE, or WebSocket API.
 
 The embedded page receives only its selected source ID from the server. Its
@@ -137,85 +136,77 @@ the trusted network.
 
 ## Source contract
 
-Each configured source supplies:
+The implemented shared contract is [source-control-v1](contracts/source-control-v1.md).
+Each source owns one XRPC `http.v1` Unix socket beneath an owned 0700 runtime
+directory, with a fresh process incarnation and socket mode 0600. Edge discovers
+GET `/v1/describe`, binds its returned `service_ref`, and validates GET
+`/v1/media/sources/{sourceId}/describe` before opening the media listener.
 
-- a stable source ID;
-- a loopback H264/RTP endpoint using payload type 96;
-- an absolute Unix control socket;
+The source descriptor is authoritative for loopback H264/RTP payload 96 at
+90 kHz, fixed destination port, geometry, cadence, optical frame and capabilities.
+Optional deployment geometry assertions must all match it. Internal control is
+instance-bound `start`, `stop`, `request-keyframe`, `capture`, `status` and
+revision-checked ephemeral `config`; only native completion returns `applied`.
+There are no legacy NDJSON, set-active or snapshot control aliases.
 
-On startup Edge sends:
+JPEG capture is independent of H264 GOP. Sources that cannot force a real IDR
+advertise bounded GOP and explicitly reject force-IDR. Edge only requests a
+keyframe when a source advertises actual support. A capture retains one frame's
+JPEG, optional exact RGB8, source clock/time, optical frame and frame sequence.
+Native multipart streams these buffers without Base64 or a whole-frame join.
+Missing camera intrinsics are reported as `calibrationState: unavailable`;
+Edge never invents K from image dimensions or substitutes wall clock for missing
+source time.
 
-```json
-{"operation":"describe"}
+Local capture clients discover the edge's explicitly granted `--rpc-socket`
+(service `media-edge`), then use
+instance-bound POST `/v1/media/sources/{sourceId}/capture` with
+`{includeRgb:false,requestKeyframe:false,requireFresh:true}`. The result is the
+same native multipart contract. DELETE `/v1/media/snapshots/{snapshotId}`
+releases retained capture data. The former unfenced TCP snapshot API is removed.
+Browser signaling remains on its direct HTTP listener.
+
+The runnable [SDK client example](examples/capture_client/main.go) discovers and
+binds the edge incarnation, streams one JPEG capture to disk with the unchanged
+same-frame JSON metadata, closes its response, then explicitly deletes retention:
+
+```bash
+go run ./examples/capture_client \
+  --rpc-socket /run/xgc2/media-edge/control/control.sock \
+  --source front --output front.jpg
 ```
 
-The source must answer one newline-delimited JSON object:
+It requires no former TCP capture entry. The example's native MIME header phases,
+metadata and JPEG length are bounded, and capture POST is never retried.
 
-```json
-{
-  "ok": true,
-  "protocolVersion": 1,
-  "sourceId": "camera",
-  "codec": "H264",
-  "rtpPayloadType": 96,
-  "rtpClockRate": 90000,
-  "rtpHost": "127.0.0.1",
-  "rtpPort": 5004,
-  "width": 1920,
-  "height": 1080,
-  "fps": 30,
-  "frameId": "camera_optical",
-  "capabilities": ["set-active", "request-keyframe", "snapshot", "fresh-snapshot"]
-}
-```
+Resource admission defaults are 16 configured sources, 32 established or
+negotiating sessions, 16 domain calls, one capture and one coalesced keyframe call
+per source. A capture is at most 64 MiB JPEG+RGB (`--max-capture-bytes`), with
+32 MiB JPEG and 128 MiB RGB absolute ceilings. Retention holds at most two
+captures per source and 128 MiB product-wide (`--max-retained-snapshot-bytes`),
+evicting the oldest captures first. The limit applies before declared payload
+allocation. MIME metadata is at most 64 KiB; each native parser header/preamble
+phase is bounded to 16 KiB plus 4096 bytes of native read-ahead. These finite
+policy limits are not measured peak RSS or a 4K throughput claim.
 
-This description is the runtime authority for the source's loopback RTP
-destination, width, height, frame rate, and optical frame ID. The RTP endpoint
-must use a fixed port from 1 through 65535 and match Edge's configured listener,
-which turns a mistyped camera/Edge port into a startup error instead of a
-permanently black stream. The corresponding media CLI values are optional
-deployment assertions: omit all four to learn them from the source, or provide
-all four and require an exact match. A source ID, codec, RTP contract, endpoint,
-metadata, or capability mismatch prevents Edge from opening any listener.
+Source health separates edge demand/uncertainty, the bound source's native
+applied state and the MediaMTX RTP path. A failed native stop retains the source
+client and ownership for another explicit Close; it never reports that source
+inactive merely because the reply was lost. Source restart rejects stale calls;
+a product owner must establish a fresh edge rather than rediscovering and
+replaying mutations implicitly.
 
-The same newline-delimited JSON Unix protocol supports:
+WHEP creation keeps its source lease and bounded session slot when the creation
+reply is lost. Native inventory and the MediaMTX API session UUID permit cleanup
+without replaying POST. Inventory is capped at 1024 complete entries and 2 MiB;
+each reconcile pass has four cleanup attempts and a shared two-second deadline.
+Unknown absence retains ownership until creation/deletion is observed or the
+managed MediaMTX child has actually exited.
 
-- `describe`;
-- `set-active`;
-- `request-keyframe`;
-- `snapshot`.
-
-A snapshot is one immutable transaction containing display JPEG bytes, camera
-intrinsics, distortion coefficients, frame ID, and a source-clock timestamp.
-The legacy/default request also carries exact RGB8 bytes; a detector may send
-`{"includeRgb":false,"requestKeyframe":false,"requireFresh":true}` to receive
-only the first source frame completed after its request, without coupling the
-transaction to the H264 GOP. Sources may additionally report the actual JPEG
-backend/readback path, fallback reason, and bounded timing diagnostics; Edge
-retains these fields with the immutable snapshot metadata.
-
-New sources also identify the timestamp's clock domain using the
-`xgc_camera_msgs/StreamInfo` vocabulary. A source may return the fields below;
-Edge passes them through without requiring them from older protocol-v1
-sources:
-
-```json
-{
-  "timestampClockDomain": "simulation",
-  "renderPose": {
-    "position": {"x": 1.0, "y": 2.0, "z": 3.0},
-    "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
-  },
-  "poseFrameId": "world"
-}
-```
-
-`timestampClockDomain` is one of `simulation`, `system_realtime`, `monotonic`,
-`device`, or `unknown`. If an older source omits both domain and timestamp,
-Edge explicitly labels its local fallback `system_realtime`. `renderPose` is
-the camera pose for the exact snapshot render, expressed in `poseFrameId`; it
-is intended for evidence packages and calibration. Live pixels never use HTTP
-polling.
+The process snapshots `XGC2_XRPC_` policy once at startup and gives the same
+immutable SDK policy to browser/private hosts and source client pools. Explicit
+settings for unimplemented diagnostics, client registry or gRPC roles fail
+startup. Effective values and policy sources appear in private discovery.
 
 ## Optional H264 recording
 
@@ -233,7 +224,7 @@ second recorder queue. Only one recording may be active per source; viewers can
 join or leave independently. A recording retains the source lease, so zero
 viewers does not stop capture.
 
-Recording control follows the snapshot security boundary and rejects every
+Recording control rejects every
 non-loopback client:
 
 | Method | Path | Purpose |
@@ -302,6 +293,7 @@ npm --prefix web ci
 npm --prefix web run build
 go test ./...
 go test -race ./...
+XGC_MEDIA_SOURCE_FIXTURE=1 go test -race ./internal/mediaedge -run TestRealPythonSourceControlAndEdgeCapture -v
 ./.xgc2/scripts/build.sh
 ```
 
@@ -357,12 +349,12 @@ document. A ready-to-copy two-source document is checked in at
     {
       "id": "front",
       "rtpListenAddress": "127.0.0.1:5004",
-      "controlSocket": "/tmp/xgc2/media/front.sock"
+      "controlSocket": "/run/xgc2/media/front/source.sock"
     },
     {
       "id": "world",
       "rtpListenAddress": "127.0.0.1:5006",
-      "controlSocket": "/tmp/xgc2/media/world.sock",
+      "controlSocket": "/run/xgc2/media/world/source.sock",
       "width": 3840,
       "height": 2160,
       "fps": 30,
@@ -373,13 +365,23 @@ document. A ready-to-copy two-source document is checked in at
 ```
 
 ```bash
+sudo /usr/lib/xgc2-media-edge/prepare-runtime \
+  --runtime-root /run/xgc2/media-edge --uid "$(id -u)" --gid "$(id -g)"
+
 ./.ci/bin/xgc-media-edge \
   --control-address 0.0.0.0:18090 \
+  --rpc-socket /run/xgc2/media-edge/control/control.sock \
+  --mediamtx-runtime-dir /run/xgc2/media-edge/mediamtx \
   --allowed-origin http://192.168.1.20:3000 \
   --recording-root /var/lib/xgc2/media-recordings \
   --recording-max-bitrate 13500000 \
   --sources-config /run/xgc2/media/sources.json
 ```
+
+Runtime preparation is an explicit deployment action, required before an
+unprivileged owner can use `/run`. Existing foreign/misconfigured directories and
+symlink ancestors fail; startup has no temporary-directory fallback. Source
+adapter runtime grants are owned separately by their deployments.
 
 Unknown JSON fields, an empty source list, duplicate IDs, non-loopback RTP
 listeners, reused UDP ports, or a mismatch with a source's authoritative

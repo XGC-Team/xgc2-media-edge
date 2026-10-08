@@ -6,6 +6,7 @@ package mediaedge
 import (
 	"errors"
 	"fmt"
+	"github.com/XGC-Team/xgc2-xrpc/go"
 	"net"
 	"net/url"
 	"path/filepath"
@@ -26,8 +27,11 @@ const (
 	// Full snapshots can contain uncompressed RGB. At 4K that representation is
 	// roughly 24 MiB; JPEG-only callers omit it. Both forms are intentionally
 	// short-lived calibration transactions, not a second video buffer in Edge.
-	defaultSnapshotTTL = 15 * time.Second
-	maximumSnapshots   = 2
+	defaultSnapshotTTL   = 15 * time.Second
+	maximumSnapshots     = 2
+	maximumSources       = 16
+	defaultMaxSessions   = 32
+	defaultMaxOperations = 16
 
 	defaultRecordingSegment        = 5 * time.Minute
 	defaultRecordingMaxDuration    = 24 * time.Hour
@@ -41,15 +45,21 @@ const (
 // target interface for direct browser signaling. Browser media candidates are
 // created by MediaMTX and can use direct ICE or a configured TURN service.
 type Config struct {
-	ControlAddress       string
-	AllowedOrigins       []string
-	Sources              []SourceConfig
-	ICEServers           []ICEServerConfig
-	PublicIPs            []string
-	SessionGracePeriod   time.Duration
-	SnapshotTTL          time.Duration
-	SessionGatherTimeout time.Duration
-	Recording            RecordingConfig
+	ControlAddress           string
+	RPCSocket                string
+	AllowedOrigins           []string
+	Sources                  []SourceConfig
+	ICEServers               []ICEServerConfig
+	PublicIPs                []string
+	SessionGracePeriod       time.Duration
+	SnapshotTTL              time.Duration
+	SessionGatherTimeout     time.Duration
+	Recording                RecordingConfig
+	MaxSessions              int
+	MaxOperations            int
+	MaxCaptureBytes          int64
+	MaxRetainedSnapshotBytes int64
+	RuntimePolicy            *xrpc.Policy
 }
 
 // ICEServerConfig is the product-facing STUN/TURN contract. The media kernel
@@ -81,22 +91,48 @@ type RecordingConfig struct {
 // reachable. The four media metadata fields are optional expected values: all
 // four must be omitted or all four must match the authoritative describe reply.
 type SourceConfig struct {
-	ID               string  `json:"id"`
-	RTPListenAddress string  `json:"rtpListenAddress"`
-	ControlSocket    string  `json:"controlSocket"`
-	Width            int     `json:"width,omitempty"`
-	Height           int     `json:"height,omitempty"`
-	FPS              float64 `json:"fps,omitempty"`
-	FrameID          string  `json:"frameId,omitempty"`
+	ID                       string  `json:"id"`
+	RTPListenAddress         string  `json:"rtpListenAddress"`
+	ControlSocket            string  `json:"controlSocket"`
+	ControlInstanceID        string  `json:"controlInstanceId,omitempty"`
+	Width                    int     `json:"width,omitempty"`
+	Height                   int     `json:"height,omitempty"`
+	FPS                      float64 `json:"fps,omitempty"`
+	FrameID                  string  `json:"frameId,omitempty"`
+	KeyframeRequestSupported bool    `json:"-"`
 }
 
 func (config Config) normalized() (Config, error) {
+	if config.RPCSocket != "" && (!filepath.IsAbs(config.RPCSocket) || filepath.Clean(config.RPCSocket) != config.RPCSocket || len(config.RPCSocket) >= 108 || strings.ContainsAny(config.RPCSocket, "\x00\r\n")) {
+		return Config{}, errors.New("media edge RPC socket must be a canonical absolute Unix path shorter than 108 bytes")
+	}
 	config.ControlAddress = strings.TrimSpace(config.ControlAddress)
 	if err := requireTCPAddress(config.ControlAddress); err != nil {
 		return Config{}, fmt.Errorf("media edge control address: %w", err)
 	}
 	if len(config.Sources) == 0 {
 		return Config{}, errors.New("media edge requires at least one source")
+	}
+	if len(config.Sources) > maximumSources {
+		return Config{}, errors.New("media edge supports at most 16 sources")
+	}
+	if config.MaxSessions == 0 {
+		config.MaxSessions = defaultMaxSessions
+	}
+	if config.MaxOperations == 0 {
+		config.MaxOperations = defaultMaxOperations
+	}
+	if config.MaxCaptureBytes == 0 {
+		config.MaxCaptureBytes = 64 << 20
+	}
+	if config.MaxRetainedSnapshotBytes == 0 {
+		config.MaxRetainedSnapshotBytes = 128 << 20
+	}
+	if config.MaxCaptureBytes < 1024 || config.MaxCaptureBytes > maximumCameraJPEGBytes+maximumCameraRGBBytes || config.MaxRetainedSnapshotBytes < config.MaxCaptureBytes || config.MaxRetainedSnapshotBytes > 1<<30 {
+		return Config{}, errors.New("media snapshot budgets require capture 1 KiB..160 MiB and retention capture..1 GiB")
+	}
+	if config.MaxSessions < 1 || config.MaxSessions > 1024 || config.MaxOperations < 1 || config.MaxOperations > 128 {
+		return Config{}, errors.New("media edge sessions must be 1..1024 and operations 1..128")
 	}
 	if config.SessionGracePeriod <= 0 {
 		config.SessionGracePeriod = defaultSessionGrace
@@ -113,6 +149,8 @@ func (config Config) normalized() (Config, error) {
 	}
 	config.Recording = recording
 	seen := make(map[string]struct{}, len(config.Sources))
+	seenSockets := make(map[string]struct{}, len(config.Sources))
+	seenRTP := make(map[string]struct{}, len(config.Sources))
 	for index := range config.Sources {
 		source, err := config.Sources[index].normalized()
 		if err != nil {
@@ -122,6 +160,14 @@ func (config Config) normalized() (Config, error) {
 			return Config{}, fmt.Errorf("media source %q is duplicated", source.ID)
 		}
 		seen[source.ID] = struct{}{}
+		if _, duplicate := seenSockets[source.ControlSocket]; duplicate {
+			return Config{}, errors.New("media sources must not share a control socket")
+		}
+		if _, duplicate := seenRTP[source.RTPListenAddress]; duplicate {
+			return Config{}, errors.New("media sources must not share an RTP listener")
+		}
+		seenSockets[source.ControlSocket] = struct{}{}
+		seenRTP[source.RTPListenAddress] = struct{}{}
 		config.Sources[index] = source
 	}
 	for _, publicIP := range config.PublicIPs {
@@ -214,7 +260,7 @@ func (config SourceConfig) normalized() (SourceConfig, error) {
 	if err := requireLoopbackUDP(config.RTPListenAddress); err != nil {
 		return SourceConfig{}, fmt.Errorf("media source %q RTP listener: %w", config.ID, err)
 	}
-	if !strings.HasPrefix(config.ControlSocket, "/") {
+	if !filepath.IsAbs(config.ControlSocket) || filepath.Clean(config.ControlSocket) != config.ControlSocket || len(config.ControlSocket) >= 108 || strings.ContainsAny(config.ControlSocket, "\x00\r\n") {
 		return SourceConfig{}, fmt.Errorf("media source %q control socket must be an absolute Unix path", config.ID)
 	}
 	if config.hasExpectedMetadata() {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -35,42 +36,38 @@ func newLifecycleControlProbe(t *testing.T) *lifecycleControlProbe {
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			connection, err := listener.Accept()
-			if err != nil {
+	server := &http.Server{ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(writer http.ResponseWriter, incoming *http.Request) {
+		writer.Header().Set("X-Xrpc-Instance-ID", "test-instance")
+		var request sourceControlRequest
+		if incoming.Method != http.MethodGet && json.NewDecoder(incoming.Body).Decode(&request) != nil {
+			writer.WriteHeader(400)
+			return
+		}
+		operation := pathBase(incoming.URL.Path)
+		if operation == "start" || operation == "stop" {
+			failed := false
+			if operation == "start" {
+				failed = probe.starts.Add(1) <= probe.failStarts.Load()
+			} else {
+				failed = probe.stops.Add(1) <= probe.failStops.Load()
+			}
+			if failed {
+				conn, _, err := writer.(http.Hijacker).Hijack()
+				if err == nil {
+					conn.Close()
+				}
 				return
 			}
-			func() {
-				defer connection.Close()
-				_ = connection.SetDeadline(time.Now().Add(time.Second))
-				var request sourceControlRequest
-				if json.NewDecoder(connection).Decode(&request) != nil {
-					return
-				}
-				if request.Operation == "set-active" && request.Active != nil {
-					if *request.Active {
-						if probe.starts.Add(1) <= probe.failStarts.Load() {
-							return
-						}
-					} else if probe.stops.Add(1) <= probe.failStops.Load() {
-						return
-					}
-				}
-				_ = json.NewEncoder(connection).Encode(map[string]bool{"ok": true})
-			}()
 		}
-	}()
-	t.Cleanup(func() {
-		_ = listener.Close()
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Error("control probe did not exit")
+		state := "idle"
+		if operation == "start" {
+			state = "active"
 		}
-	})
+		json.NewEncoder(writer).Encode(sourceControlResponse{OK: true, ManagedSourceID: "camera", Active: operation == "start", Completion: "applied", State: state, ConfigurationRevision: 1})
+	})}
+	go server.Serve(listener)
+	t.Cleanup(func() { server.Close() })
+
 	return probe
 }
 
@@ -81,7 +78,7 @@ func newLifecycleSource(t *testing.T, probe *lifecycleControlProbe) *mediaMTXSou
 		config: Config{SessionGracePeriod: time.Hour}, lifecycleContext: ctx,
 	}
 	source := &mediaMTXSource{
-		server: server, config: SourceConfig{ID: "camera", ControlSocket: probe.socket},
+		server: server, config: SourceConfig{ID: "camera", ControlSocket: probe.socket, ControlInstanceID: "test-instance"},
 		sessions: make(map[string]struct{}), active: true,
 		activeSince: time.Now().Add(-10 * sourceStallTimeout),
 	}

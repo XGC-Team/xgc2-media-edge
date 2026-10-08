@@ -21,30 +21,35 @@ var version = "dev"
 
 func main() {
 	var (
-		controlAddress          = flag.String("control-address", "127.0.0.1:18090", "HTTP listen address; explicitly bind a target interface for remote browsers")
-		mediaMTXExecutable      = flag.String("mediamtx-executable", "/usr/lib/xgc2-media-edge/mediamtx", "absolute path to the pinned MediaMTX binary")
-		mediaMTXRuntimeDir      = flag.String("mediamtx-runtime-dir", "/run/xgc2/media-edge", "absolute private runtime directory for generated MediaMTX configuration")
-		mediaMTXAPIAddress      = flag.String("mediamtx-api-address", "127.0.0.1:19997", "loopback-only MediaMTX control API address")
-		mediaMTXWHEPAddress     = flag.String("mediamtx-whep-address", "127.0.0.1:18889", "loopback-only MediaMTX WHEP HTTP address; XGC proxies browser signaling")
-		mediaMTXICEUDPAddress   = flag.String("webrtc-ice-udp-address", "0.0.0.0:18189", "MediaMTX fixed WebRTC ICE UDP listener")
-		mediaMTXICETCPAddress   = flag.String("webrtc-ice-tcp-address", "", "optional MediaMTX fixed WebRTC ICE TCP listener")
-		mediaMTXInterfaceIPs    = flag.Bool("webrtc-interface-ips", true, "advertise target interface IPs as ICE candidates")
-		sourcesConfig           = flag.String("sources-config", "", "required JSON file containing one or more local media sources")
-		allowedOrigins          multiString
-		publicIPs               multiString
-		iceURLs                 multiString
-		iceUsername             = flag.String("ice-username", "", "optional shared TURN username")
-		iceCredential           = flag.String("ice-credential", "", "optional shared TURN credential")
-		grace                   = flag.Duration("session-grace", 10*time.Second, "idle source stop delay")
-		snapshotTTL             = flag.Duration("snapshot-ttl", 2*time.Minute, "immutable snapshot retention")
-		recordingRoot           = flag.String("recording-root", "", "absolute local recording root; empty disables recording")
-		recordingMaxBitrate     = flag.Uint64("recording-max-bitrate", 0, "configured source peak bitrate in bits/s; required with --recording-root")
-		recordingSegment        = flag.Duration("recording-segment-duration", 0, "target segment duration; cuts at the next IDR, default 5m")
-		recordingMaxDuration    = flag.Duration("recording-max-duration", 0, "maximum accepted recording duration, default 24h")
-		recordingFinalize       = flag.Duration("recording-finalize-timeout", 0, "MediaMTX segment finalization timeout, default 15s")
-		recordingMinimumFree    = flag.Uint64("recording-minimum-free-bytes", 0, "filesystem space retained after capacity admission, default 1 GiB")
-		recordingCapacityFactor = flag.Float64("recording-capacity-safety-factor", 0, "peak-bitrate capacity multiplier, default 1.20")
-		printVersion            = flag.Bool("version", false, "print version and exit")
+		controlAddress           = flag.String("control-address", "127.0.0.1:18090", "HTTP listen address; explicitly bind a target interface for remote browsers")
+		rpcSocket                = flag.String("rpc-socket", "", "required granted private XRPC socket beneath an owned 0700 runtime directory")
+		maxSessions              = flag.Int("max-sessions", 32, "maximum active and negotiating WebRTC sessions")
+		maxOperations            = flag.Int("max-operations", 16, "maximum concurrent source domain operations")
+		maxCaptureBytes          = flag.Int64("max-capture-bytes", 64<<20, "maximum JPEG plus RGB bytes per immutable capture")
+		maxRetainedSnapshotBytes = flag.Int64("max-retained-snapshot-bytes", 128<<20, "total retained immutable snapshot byte budget")
+		mediaMTXExecutable       = flag.String("mediamtx-executable", "/usr/lib/xgc2-media-edge/mediamtx", "absolute path to the pinned MediaMTX binary")
+		mediaMTXRuntimeDir       = flag.String("mediamtx-runtime-dir", "/run/xgc2/media-edge/mediamtx", "granted absolute private runtime directory for generated MediaMTX configuration")
+		mediaMTXAPIAddress       = flag.String("mediamtx-api-address", "127.0.0.1:19997", "loopback-only MediaMTX control API address")
+		mediaMTXWHEPAddress      = flag.String("mediamtx-whep-address", "127.0.0.1:18889", "loopback-only MediaMTX WHEP HTTP address; XGC proxies browser signaling")
+		mediaMTXICEUDPAddress    = flag.String("webrtc-ice-udp-address", "0.0.0.0:18189", "MediaMTX fixed WebRTC ICE UDP listener")
+		mediaMTXICETCPAddress    = flag.String("webrtc-ice-tcp-address", "", "optional MediaMTX fixed WebRTC ICE TCP listener")
+		mediaMTXInterfaceIPs     = flag.Bool("webrtc-interface-ips", true, "advertise target interface IPs as ICE candidates")
+		sourcesConfig            = flag.String("sources-config", "", "required JSON file containing one or more local media sources")
+		allowedOrigins           multiString
+		publicIPs                multiString
+		iceURLs                  multiString
+		iceUsername              = flag.String("ice-username", "", "optional shared TURN username")
+		iceCredential            = flag.String("ice-credential", "", "optional shared TURN credential")
+		grace                    = flag.Duration("session-grace", 10*time.Second, "idle source stop delay")
+		snapshotTTL              = flag.Duration("snapshot-ttl", 15*time.Second, "immutable snapshot retention")
+		recordingRoot            = flag.String("recording-root", "", "absolute local recording root; empty disables recording")
+		recordingMaxBitrate      = flag.Uint64("recording-max-bitrate", 0, "configured source peak bitrate in bits/s; required with --recording-root")
+		recordingSegment         = flag.Duration("recording-segment-duration", 0, "target segment duration; cuts at the next IDR, default 5m")
+		recordingMaxDuration     = flag.Duration("recording-max-duration", 0, "maximum accepted recording duration, default 24h")
+		recordingFinalize        = flag.Duration("recording-finalize-timeout", 0, "MediaMTX segment finalization timeout, default 15s")
+		recordingMinimumFree     = flag.Uint64("recording-minimum-free-bytes", 0, "filesystem space retained after capacity admission, default 1 GiB")
+		recordingCapacityFactor  = flag.Float64("recording-capacity-safety-factor", 0, "peak-bitrate capacity multiplier, default 1.20")
+		printVersion             = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Var(&allowedOrigins, "allowed-origin", "exact cross-origin WebUI origin, for example https://station.example:8443; repeat as needed")
 	flag.Var(&publicIPs, "public-ip", "public ICE address; repeat for multiple addresses")
@@ -55,17 +60,26 @@ func main() {
 		return
 	}
 
+	if strings.TrimSpace(*rpcSocket) == "" {
+		log.Fatal("--rpc-socket is required; grant an owned private runtime directory before startup")
+	}
+
 	sources, err := resolveSources(*sourcesConfig)
 	if err != nil {
 		log.Fatalf("invalid XGC media-edge source configuration: %v", err)
 	}
 	config := mediaedge.Config{
-		ControlAddress:     *controlAddress,
-		AllowedOrigins:     append([]string(nil), allowedOrigins...),
-		Sources:            sources,
-		PublicIPs:          append([]string(nil), publicIPs...),
-		SessionGracePeriod: *grace,
-		SnapshotTTL:        *snapshotTTL,
+		ControlAddress:           *controlAddress,
+		RPCSocket:                *rpcSocket,
+		MaxSessions:              *maxSessions,
+		MaxOperations:            *maxOperations,
+		MaxCaptureBytes:          *maxCaptureBytes,
+		MaxRetainedSnapshotBytes: *maxRetainedSnapshotBytes,
+		AllowedOrigins:           append([]string(nil), allowedOrigins...),
+		Sources:                  sources,
+		PublicIPs:                append([]string(nil), publicIPs...),
+		SessionGracePeriod:       *grace,
+		SnapshotTTL:              *snapshotTTL,
 		Recording: mediaedge.RecordingConfig{
 			Root:                    *recordingRoot,
 			MaxBitrateBitsPerSecond: *recordingMaxBitrate,
@@ -80,6 +94,11 @@ func main() {
 		config.ICEServers = []mediaedge.ICEServerConfig{{
 			URLs: append([]string(nil), iceURLs...), Username: strings.TrimSpace(*iceUsername), Credential: *iceCredential,
 		}}
+	}
+	// This is the sole environment snapshot for all shared XRPC owners.
+	config.RuntimePolicy, err = mediaedge.ResolveRuntimePolicy(os.Environ(), config)
+	if err != nil {
+		log.Fatalf("invalid XGC media-edge XRPC startup policy: %v", err)
 	}
 	server, err := mediaedge.NewMediaMTX(config, mediaedge.MediaMTXSettings{
 		Executable: *mediaMTXExecutable, RuntimeDir: *mediaMTXRuntimeDir,
@@ -100,6 +119,7 @@ func main() {
 	<-ctx.Done()
 	if err := server.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, "stop XGC media edge:", err)
+		os.Exit(1)
 	}
 }
 

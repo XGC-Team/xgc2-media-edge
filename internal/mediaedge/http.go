@@ -5,11 +5,11 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"github.com/XGC-Team/xgc2-xrpc/go/httpx"
 	"html/template"
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -21,7 +21,8 @@ var playerPage = template.Must(template.ParseFS(playerFiles, "player/index.html"
 
 type httpServer struct {
 	server         httpBackend
-	http           *http.Server
+	host           *httpx.Host
+	options        httpx.HostOptions
 	allowedOrigins map[string]struct{}
 }
 
@@ -46,35 +47,55 @@ func newHTTPServer(server httpBackend) *httpServer {
 		allowedOrigins[origin] = struct{}{}
 	}
 	httpServer := &httpServer{server: server, allowedOrigins: allowedOrigins}
-	httpServer.http = &http.Server{
-		Handler:           http.HandlerFunc(httpServer.route),
-		ReadHeaderTimeout: 3 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      20 * time.Second,
-		IdleTimeout:       30 * time.Second,
-		MaxHeaderBytes:    16 << 10,
-	}
 	return httpServer
 }
 
-func (server *httpServer) serve(listener net.Listener) error {
-	err := server.http.Serve(listener)
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+func (server *httpServer) start(listener net.Listener) error {
+	options, err := server.server.HTTPConfig().hostOptions(false)
+	if err != nil {
+		return err
 	}
-	return err
+	server.options = options
+	host, err := httpx.ServeEdge(listener, http.HandlerFunc(server.route), options)
+	if err != nil {
+		return err
+	}
+	server.host = host
+	return nil
 }
 
 func (server *httpServer) close() error {
-	if server == nil || server.http == nil {
+	if server == nil || server.host == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	timeout := server.options.ShutdownTimeout
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return server.http.Shutdown(ctx)
+	err := server.host.Shutdown(ctx)
+	select {
+	case <-server.host.Drained():
+		return server.host.Wait()
+	default:
+		return err
+	}
 }
 
 func (server *httpServer) route(writer http.ResponseWriter, request *http.Request) {
+	// Bound both body reads and final flush on the browser edge. This edge has
+	// finite signaling and assets, so it does not admit indefinitely open IO.
+	deadline := time.Now().Add(15 * time.Second)
+	if server.options.MaxCallTime > 0 {
+		deadline = time.Now().Add(server.options.MaxCallTime)
+	}
+	if caller, ok := request.Context().Deadline(); ok && caller.Before(deadline) {
+		deadline = caller
+	}
+	controller := http.NewResponseController(writer)
+	_ = controller.SetReadDeadline(deadline)
+	_ = controller.SetWriteDeadline(deadline)
 	path := strings.Trim(strings.TrimSpace(request.URL.Path), "/")
 	parts := strings.Split(path, "/")
 	if recordingHTTPRoute(parts) {
@@ -83,14 +104,6 @@ func (server *httpServer) route(writer http.ResponseWriter, request *http.Reques
 			return
 		}
 		server.routeRecording(writer, request, parts)
-		return
-	}
-	if snapshotHTTPRoute(parts) {
-		if !requestFromLoopback(request) {
-			writeError(writer, http.StatusForbidden, "media edge snapshot API is loopback-only")
-			return
-		}
-		server.routeSnapshot(writer, request, parts)
 		return
 	}
 	addVary(writer.Header(), "Origin")
@@ -183,39 +196,6 @@ func recordingHTTPRoute(parts []string) bool {
 			parts[0] == "api" && parts[1] == "v1" && parts[2] == "recordings") ||
 		(len(parts) == 4 &&
 			parts[0] == "api" && parts[1] == "v1" && parts[2] == "recordings")
-}
-
-func (server *httpServer) routeSnapshot(
-	writer http.ResponseWriter,
-	request *http.Request,
-	parts []string,
-) {
-	switch {
-	case request.Method == http.MethodPost && len(parts) == 5 &&
-		parts[0] == "api" && parts[1] == "v1" && parts[2] == "sources" && parts[4] == "snapshots":
-		server.captureSnapshot(writer, request, parts[3])
-	case request.Method == http.MethodGet && len(parts) == 5 &&
-		parts[0] == "api" && parts[1] == "v1" && parts[2] == "snapshots" && parts[4] == "raw":
-		server.readSnapshotRaw(writer, parts[3])
-	case request.Method == http.MethodGet && len(parts) == 5 &&
-		parts[0] == "api" && parts[1] == "v1" && parts[2] == "snapshots" && parts[4] == "jpeg":
-		server.readSnapshotJPEG(writer, parts[3])
-	case request.Method == http.MethodDelete && len(parts) == 4 &&
-		parts[0] == "api" && parts[1] == "v1" && parts[2] == "snapshots":
-		server.deleteSnapshot(writer, parts[3])
-	default:
-		writeError(writer, http.StatusNotFound, "media edge endpoint was not found")
-	}
-}
-
-func snapshotHTTPRoute(parts []string) bool {
-	return (len(parts) == 5 &&
-		parts[0] == "api" && parts[1] == "v1" && parts[2] == "sources" && parts[4] == "snapshots") ||
-		(len(parts) == 5 &&
-			parts[0] == "api" && parts[1] == "v1" && parts[2] == "snapshots" &&
-			(parts[4] == "raw" || parts[4] == "jpeg")) ||
-		(len(parts) == 4 &&
-			parts[0] == "api" && parts[1] == "v1" && parts[2] == "snapshots")
 }
 
 func (server *httpServer) serveSelectedPlayer(writer http.ResponseWriter, requested string) {
@@ -384,6 +364,9 @@ func (server *httpServer) openSession(writer http.ResponseWriter, request *http.
 	answer, err := server.server.OpenSession(request.Context(), sourceID, offer)
 	if err != nil {
 		status := http.StatusBadRequest
+		if errors.Is(err, ErrMediaCapacity) {
+			status = http.StatusTooManyRequests
+		}
 		if strings.Contains(err.Error(), "was not found") {
 			status = http.StatusNotFound
 		}
@@ -404,60 +387,6 @@ func (server *httpServer) closeSession(writer http.ResponseWriter, sessionID str
 	}
 	if !found {
 		writeError(writer, http.StatusNotFound, "media session was not found")
-		return
-	}
-	writer.WriteHeader(http.StatusNoContent)
-}
-
-func (server *httpServer) captureSnapshot(writer http.ResponseWriter, request *http.Request, sourceID string) {
-	var input SnapshotCaptureRequest
-	if !decodeJSON(writer, request, &input) {
-		return
-	}
-	snapshot, err := server.server.CaptureSnapshot(request.Context(), sourceID, input)
-	if err != nil {
-		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "was not found") {
-			status = http.StatusNotFound
-		} else if strings.Contains(err.Error(), "activate media source") || strings.Contains(err.Error(), "capture source") {
-			status = http.StatusServiceUnavailable
-		}
-		writeError(writer, status, err.Error())
-		return
-	}
-	writeJSON(writer, http.StatusCreated, snapshot.metadata())
-}
-
-func (server *httpServer) readSnapshotRaw(writer http.ResponseWriter, snapshotID string) {
-	snapshot, found := server.server.Snapshot(snapshotID)
-	if !found {
-		writeError(writer, http.StatusNotFound, "media snapshot was not found")
-		return
-	}
-	writer.Header().Set("Content-Type", "application/x-xgc-rgb8")
-	writer.Header().Set("Content-Length", strconv.Itoa(len(snapshot.RGB)))
-	writer.Header().Set("X-XGC-Snapshot-Id", snapshot.ID)
-	writer.Header().Set("X-XGC-Frame-Id", snapshot.FrameID)
-	writer.Header().Set("X-XGC-Width", strconv.Itoa(snapshot.Width))
-	writer.Header().Set("X-XGC-Height", strconv.Itoa(snapshot.Height))
-	_, _ = writer.Write(snapshot.RGB)
-}
-
-func (server *httpServer) readSnapshotJPEG(writer http.ResponseWriter, snapshotID string) {
-	snapshot, found := server.server.Snapshot(snapshotID)
-	if !found {
-		writeError(writer, http.StatusNotFound, "media snapshot was not found")
-		return
-	}
-	writer.Header().Set("Content-Type", "image/jpeg")
-	writer.Header().Set("Content-Length", strconv.Itoa(len(snapshot.JPEG)))
-	writer.Header().Set("Cache-Control", "no-store")
-	_, _ = writer.Write(snapshot.JPEG)
-}
-
-func (server *httpServer) deleteSnapshot(writer http.ResponseWriter, snapshotID string) {
-	if !server.server.DeleteSnapshot(snapshotID) {
-		writeError(writer, http.StatusNotFound, "media snapshot was not found")
 		return
 	}
 	writer.WriteHeader(http.StatusNoContent)

@@ -1,22 +1,31 @@
 package mediaedge
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	xrpc "github.com/XGC-Team/xgc2-xrpc/go"
+	"github.com/XGC-Team/xgc2-xrpc/go/httpx"
 	"io"
 	"math"
+	"mime"
+	"mime/multipart"
 	"net"
+	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const maximumControlHeaderBytes = 64 << 10
+const maximumCameraPartHeaderBytes = 16 << 10
+const maximumCameraJPEGBytes = 32 << 20
+const maximumCameraRGBBytes = 128 << 20
 
 const (
 	sourceControlProtocolVersion = 1
@@ -25,62 +34,95 @@ const (
 )
 
 var requiredSourceCapabilities = [...]string{
-	"set-active",
-	"request-keyframe",
-	"snapshot",
+	"start",
+	"stop",
+	"capture",
 	"fresh-snapshot",
 }
 
 type sourceControlRequest struct {
-	Operation       string `json:"operation"`
-	SnapshotID      string `json:"snapshotId,omitempty"`
-	Active          *bool  `json:"active,omitempty"`
-	IncludeRGB      *bool  `json:"includeRgb,omitempty"`
-	RequestKeyframe *bool  `json:"requestKeyframe,omitempty"`
-	RequireFresh    *bool  `json:"requireFresh,omitempty"`
+	Operation        string                      `json:"-"`
+	SnapshotID       string                      `json:"snapshotId,omitempty"`
+	IncludeRGB       *bool                       `json:"includeRgb,omitempty"`
+	RequestKeyframe  *bool                       `json:"requestKeyframe,omitempty"`
+	RequireFresh     *bool                       `json:"requireFresh,omitempty"`
+	ExpectedRevision *uint64                     `json:"expected_revision,omitempty"`
+	Persist          *bool                       `json:"persist,omitempty"`
+	Config           *sourceRuntimeConfiguration `json:"config,omitempty"`
+}
+
+type sourceRuntimeConfiguration struct {
+	RTPHost string `json:"rtp_host,omitempty"`
+	RTPPort int    `json:"rtp_port,omitempty"`
+	Bitrate int    `json:"bitrate,omitempty"`
 }
 
 type sourceControlResponse struct {
-	OK                        bool     `json:"ok"`
-	Error                     string   `json:"error,omitempty"`
-	ProtocolVersion           int      `json:"protocolVersion,omitempty"`
-	SourceID                  string   `json:"sourceId,omitempty"`
-	Codec                     string   `json:"codec,omitempty"`
-	RTPPayloadType            int      `json:"rtpPayloadType,omitempty"`
-	RTPClockRate              int      `json:"rtpClockRate,omitempty"`
-	RTPHost                   string   `json:"rtpHost,omitempty"`
-	RTPPort                   int      `json:"rtpPort,omitempty"`
-	FPS                       float64  `json:"fps,omitempty"`
-	Capabilities              []string `json:"capabilities,omitempty"`
-	SnapshotJpegPolicy        string   `json:"snapshotJpegPolicy,omitempty"`
-	SnapshotJpegBackend       string   `json:"snapshotJpegBackend,omitempty"`
-	SnapshotJpegHardwareState string   `json:"snapshotJpegHardwareState,omitempty"`
-	SnapshotID                string   `json:"snapshotId,omitempty"`
-	FrameID                   string   `json:"frameId,omitempty"`
+	ServiceRef                *xrpc.ServiceRef `json:"service_ref,omitempty"`
+	OK                        bool             `json:"ok"`
+	Error                     string           `json:"error,omitempty"`
+	ProtocolVersion           int              `json:"protocolVersion,omitempty"`
+	SourceID                  string           `json:"sourceId,omitempty"`
+	ManagedSourceID           string           `json:"source_id,omitempty"`
+	Codec                     string           `json:"codec,omitempty"`
+	RTPPayloadType            int              `json:"rtpPayloadType,omitempty"`
+	RTPClockRate              int              `json:"rtpClockRate,omitempty"`
+	RTPHost                   string           `json:"rtpHost,omitempty"`
+	RTPPort                   int              `json:"rtpPort,omitempty"`
+	FPS                       float64          `json:"fps,omitempty"`
+	Capabilities              []string         `json:"capabilities,omitempty"`
+	KeyframeRequestSupported  bool             `json:"keyframeRequestSupported"`
+	KeyframePolicy            string           `json:"keyframePolicy"`
+	SnapshotJpegPolicy        string           `json:"snapshotJpegPolicy,omitempty"`
+	SnapshotJpegBackend       string           `json:"snapshotJpegBackend,omitempty"`
+	SnapshotJpegHardwareState string           `json:"snapshotJpegHardwareState,omitempty"`
+	SnapshotID                string           `json:"snapshotId,omitempty"`
+	FrameID                   string           `json:"frameId,omitempty"`
 	// TimestampNanoseconds is in the source clock domain. A Gazebo source uses
 	// simulation time, so calling it UnixNano would be materially incorrect.
 	TimestampNanoseconds int64 `json:"timestampNanoseconds,omitempty"`
 	// TimestampClockDomain uses the same vocabulary as xgc_camera_msgs/StreamInfo:
 	// simulation, system_realtime, monotonic, device, or unknown.
-	TimestampClockDomain string              `json:"timestampClockDomain,omitempty"`
-	Width                int                 `json:"width,omitempty"`
-	Height               int                 `json:"height,omitempty"`
-	PixelFormat          string              `json:"pixelFormat,omitempty"`
-	JPEGBytes            int                 `json:"jpegBytes,omitempty"`
-	RGBBytes             int                 `json:"rgbBytes,omitempty"`
-	JPEGBackend          string              `json:"jpegBackend,omitempty"`
-	JPEGReadback         string              `json:"jpegReadback,omitempty"`
-	JPEGFallbackReason   string              `json:"jpegFallbackReason,omitempty"`
-	JPEGReadbackMillis   float64             `json:"jpegReadbackMilliseconds,omitempty"`
-	JPEGEncodeMillis     float64             `json:"jpegEncodeMilliseconds,omitempty"`
-	CameraMatrix         []float64           `json:"cameraMatrix,omitempty"`
-	Distortion           []float64           `json:"distortion,omitempty"`
-	RenderPose           *SnapshotRenderPose `json:"renderPose,omitempty"`
-	PoseFrameID          string              `json:"poseFrameId,omitempty"`
+	TimestampClockDomain  string                     `json:"timestampClockDomain,omitempty"`
+	Width                 int                        `json:"width,omitempty"`
+	Height                int                        `json:"height,omitempty"`
+	PixelFormat           string                     `json:"pixelFormat,omitempty"`
+	JPEGBytes             int                        `json:"jpegBytes,omitempty"`
+	RGBBytes              int                        `json:"rgbBytes,omitempty"`
+	JPEGBackend           string                     `json:"jpegBackend,omitempty"`
+	JPEGReadback          string                     `json:"jpegReadback,omitempty"`
+	JPEGFallbackReason    string                     `json:"jpegFallbackReason,omitempty"`
+	JPEGReadbackMillis    float64                    `json:"jpegReadbackMilliseconds,omitempty"`
+	JPEGEncodeMillis      float64                    `json:"jpegEncodeMilliseconds,omitempty"`
+	CameraMatrix          []float64                  `json:"cameraMatrix,omitempty"`
+	Distortion            []float64                  `json:"distortion,omitempty"`
+	RenderPose            *SnapshotRenderPose        `json:"renderPose,omitempty"`
+	PoseFrameID           string                     `json:"poseFrameId,omitempty"`
+	Completion            string                     `json:"completion,omitempty"`
+	Active                bool                       `json:"active,omitempty"`
+	CalibrationState      string                     `json:"calibrationState,omitempty"`
+	Sequence              uint64                     `json:"frameSequence,omitempty"`
+	State                 string                     `json:"state,omitempty"`
+	DesiredActive         bool                       `json:"desired_active"`
+	AppliedActive         bool                       `json:"applied_active"`
+	LastError             string                     `json:"last_error,omitempty"`
+	ConfigurationRevision uint64                     `json:"configuration_revision"`
+	Desired               sourceRuntimeConfiguration `json:"desired"`
+	Applied               sourceRuntimeConfiguration `json:"applied"`
+	DesiredRevision       uint64                     `json:"desired_revision"`
+	AppliedRevision       uint64                     `json:"applied_revision"`
+	PersistedRevision     *uint64                    `json:"persisted_revision"`
+	Persistence           string                     `json:"persistence,omitempty"`
+	MutableFields         []string                   `json:"mutable_fields,omitempty"`
 }
 
 func describeSource(ctx context.Context, config SourceConfig) (SourceConfig, error) {
-	response, _, _, err := callSourceControl(ctx, config.ControlSocket, sourceControlRequest{
+	control := &cameraControl{socket: config.ControlSocket, instance: config.ControlInstanceID, sourceID: config.ID}
+	defer control.close()
+	return describeSourceWith(ctx, config, control)
+}
+func describeSourceWith(ctx context.Context, config SourceConfig, control *cameraControl) (SourceConfig, error) {
+	response, _, _, err := control.call(ctx, sourceControlRequest{
 		Operation: "describe",
 	})
 	if err != nil {
@@ -120,9 +162,9 @@ func describeSource(ctx context.Context, config SourceConfig) (SourceConfig, err
 	); err != nil {
 		return SourceConfig{}, fmt.Errorf("capture source RTP destination: %w", err)
 	}
-	if response.Width < 16 || response.Height < 16 ||
-		response.FPS <= 0 || response.FPS > 240 ||
-		strings.TrimSpace(response.FrameID) == "" {
+	if response.Width < 16 || response.Height < 16 || int64(response.Width) > maximumCameraRGBBytes/3/int64(response.Height) ||
+		response.FPS <= 0 || response.FPS > 240 || math.IsNaN(response.FPS) ||
+		strings.TrimSpace(response.FrameID) == "" || len(response.FrameID) > 256 {
 		return SourceConfig{}, errors.New("capture source describe metadata is invalid")
 	}
 	capabilities := make(map[string]struct{}, len(response.Capabilities))
@@ -136,6 +178,10 @@ func describeSource(ctx context.Context, config SourceConfig) (SourceConfig, err
 				required,
 			)
 		}
+	}
+	_, advertisesKeyframe := capabilities["request-keyframe"]
+	if advertisesKeyframe != response.KeyframeRequestSupported || response.KeyframePolicy == "" {
+		return SourceConfig{}, errors.New("capture source keyframe capability is inconsistent")
 	}
 	if config.hasExpectedMetadata() &&
 		(response.Width != config.Width ||
@@ -158,6 +204,7 @@ func describeSource(ctx context.Context, config SourceConfig) (SourceConfig, err
 	config.Height = response.Height
 	config.FPS = response.FPS
 	config.FrameID = response.FrameID
+	config.KeyframeRequestSupported = response.KeyframeRequestSupported
 	return config, nil
 }
 
@@ -230,11 +277,13 @@ type Snapshot struct {
 	Distortion           []float64
 	RenderPose           *SnapshotRenderPose
 	PoseFrameID          string
+	CalibrationState     string
+	Sequence             uint64
 	ExpiresAt            time.Time
 }
 
 // SnapshotCaptureRequest selects only source work needed by one local
-// consumer. Nil retains the original full RGB + keyframe behavior.
+// consumer. Nil requests full RGB without forcing a keyframe.
 type SnapshotCaptureRequest struct {
 	IncludeRGB      *bool `json:"includeRgb,omitempty"`
 	RequestKeyframe *bool `json:"requestKeyframe,omitempty"`
@@ -246,7 +295,7 @@ func (request SnapshotCaptureRequest) includeRGB() bool {
 }
 
 func (request SnapshotCaptureRequest) requestKeyframe() bool {
-	return request.RequestKeyframe == nil || *request.RequestKeyframe
+	return request.RequestKeyframe != nil && *request.RequestKeyframe
 }
 
 // SnapshotRenderPose is the optional camera pose at the exact render captured
@@ -271,20 +320,23 @@ type SnapshotQuaternion struct {
 
 func (snapshot Snapshot) metadata() snapshotMetadata {
 	return snapshotMetadata{
+		OK:         true,
 		SnapshotID: snapshot.ID, SourceID: snapshot.SourceID, FrameID: snapshot.FrameID,
 		TimestampNanoseconds: snapshot.TimestampNanoseconds, TimestampClockDomain: snapshot.TimestampClockDomain,
 		Width: snapshot.Width, Height: snapshot.Height,
-		PixelFormat: snapshot.PixelFormat, JPEGBytes: len(snapshot.JPEG), CameraMatrix: append([]float64(nil), snapshot.CameraMatrix...),
+		PixelFormat: snapshot.PixelFormat, JPEGBytes: len(snapshot.JPEG), RGBBytes: len(snapshot.RGB), CameraMatrix: append([]float64(nil), snapshot.CameraMatrix...),
 		JPEGBackend: snapshot.JPEGBackend, JPEGReadback: snapshot.JPEGReadback,
 		JPEGFallbackReason: snapshot.JPEGFallbackReason,
 		JPEGReadbackMillis: snapshot.JPEGReadbackMillis,
 		JPEGEncodeMillis:   snapshot.JPEGEncodeMillis,
 		Distortion:         append([]float64(nil), snapshot.Distortion...),
 		RenderPose:         cloneSnapshotRenderPose(snapshot.RenderPose), PoseFrameID: snapshot.PoseFrameID,
+		CalibrationState: snapshot.CalibrationState, Sequence: snapshot.Sequence,
 	}
 }
 
 type snapshotMetadata struct {
+	OK                   bool                `json:"ok"`
 	SnapshotID           string              `json:"snapshotId"`
 	SourceID             string              `json:"sourceId"`
 	FrameID              string              `json:"frameId"`
@@ -294,15 +346,18 @@ type snapshotMetadata struct {
 	Height               int                 `json:"height"`
 	PixelFormat          string              `json:"pixelFormat"`
 	JPEGBytes            int                 `json:"jpegBytes"`
+	RGBBytes             int                 `json:"rgbBytes"`
 	JPEGBackend          string              `json:"jpegBackend,omitempty"`
 	JPEGReadback         string              `json:"jpegReadback,omitempty"`
 	JPEGFallbackReason   string              `json:"jpegFallbackReason,omitempty"`
 	JPEGReadbackMillis   float64             `json:"jpegReadbackMilliseconds,omitempty"`
 	JPEGEncodeMillis     float64             `json:"jpegEncodeMilliseconds,omitempty"`
-	CameraMatrix         []float64           `json:"cameraMatrix"`
-	Distortion           []float64           `json:"distortion"`
+	CameraMatrix         []float64           `json:"cameraMatrix,omitempty"`
+	Distortion           []float64           `json:"distortion,omitempty"`
 	RenderPose           *SnapshotRenderPose `json:"renderPose,omitempty"`
 	PoseFrameID          string              `json:"poseFrameId,omitempty"`
+	CalibrationState     string              `json:"calibrationState"`
+	Sequence             uint64              `json:"frameSequence"`
 }
 
 func cloneSnapshotRenderPose(pose *SnapshotRenderPose) *SnapshotRenderPose {
@@ -313,79 +368,302 @@ func cloneSnapshotRenderPose(pose *SnapshotRenderPose) *SnapshotRenderPose {
 	return &copy
 }
 
-func callSourceControl(
-	ctx context.Context,
-	socket string,
-	request sourceControlRequest,
-) (sourceControlResponse, []byte, []byte, error) {
-	// Every source-control transaction owns a hard deadline. HTTP request
-	// contexts normally carry cancellation but no deadline, and cancellation
-	// alone does not interrupt a Unix socket read after DialContext succeeds.
+// cameraControl owns one reusable XRPC transport for its source lifecycle.
+// Discovery is explicit and only /v1/describe is allowed without fencing.
+type cameraControl struct {
+	socket, instance, sourceID string
+	mu                         sync.Mutex
+	client                     *httpx.Client
+	maxCaptureBytes            int64
+	policy                     *xrpc.Policy
+}
+
+func (control *cameraControl) boundInstance() string {
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	return control.instance
+}
+
+func (control *cameraControl) close() {
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	if control.client != nil {
+		control.client.Close()
+	}
+}
+func (control *cameraControl) transport(ctx context.Context) (*httpx.Client, error) {
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	if control.client != nil {
+		return control.client, nil
+	}
+	target, err := os.Hostname()
+	if err != nil {
+		return nil, err
+	}
+	reference := xrpc.ServiceRef{TargetID: target, Service: "camera-source", APIVersion: "v1", InstanceID: control.instance, Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: control.socket}}
+	build := func(ref xrpc.ServiceRef) (*httpx.Client, error) {
+		maxCaptureBytes := control.maxCaptureBytes
+		if maxCaptureBytes == 0 {
+			maxCaptureBytes = 64 << 20
+		}
+		options := httpx.Config{LocalTargetID: target, Service: ref, MaxConnections: 2, MaxInFlight: 4, MaxRequestBytes: 300 << 10, MaxResponseBytes: maxCaptureBytes + maximumControlHeaderBytes + 4*maximumCameraPartHeaderBytes}
+		if control.policy != nil {
+			var err error
+			options, err = (httpx.Config{LocalTargetID: target, Service: ref, MaxInFlight: 4}).WithPolicy(control.policy)
+			if err != nil {
+				return nil, err
+			}
+			if limit, err := control.policy.Integer("HOST_MAX_IN_FLIGHT"); err == nil && limit < int64(options.MaxInFlight) {
+				options.MaxInFlight = int(limit)
+			}
+		}
+		return httpx.New(options)
+	}
+	client, err := build(reference)
+	if err != nil {
+		return nil, err
+	}
+	if reference.InstanceID == "" {
+		id, err := newSnapshotID()
+		if err != nil {
+			client.Close()
+			return nil, err
+		}
+		data, status, _, err := client.Do(ctx, http.MethodGet, "/v1/describe", id, "", nil)
+		client.Close()
+		if err != nil {
+			return nil, err
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("camera discovery HTTP %d", status)
+		}
+		var description sourceControlResponse
+		if err := json.Unmarshal(data, &description); err != nil {
+			return nil, err
+		}
+		if description.ServiceRef == nil {
+			return nil, errors.New("camera discovery omitted service_ref")
+		}
+		reference = *description.ServiceRef
+		if err := reference.ValidateInternal(); err != nil {
+			return nil, err
+		}
+		if reference.TargetID != target || reference.Endpoint.Kind != "unix" || reference.Endpoint.Address != control.socket || reference.Service != "camera-source" || reference.APIVersion != "v1" {
+			return nil, errors.New("camera discovery reference does not match local endpoint")
+		}
+		client, err = build(reference)
+		if err != nil {
+			return nil, err
+		}
+	}
+	control.client = client
+	control.instance = reference.InstanceID
+	return client, nil
+}
+
+// Used by boundary tests and one-shot tooling; the running media server retains
+// cameraControl and therefore does not reconnect for every operation.
+func callSourceControl(ctx context.Context, socket string, request sourceControlRequest) (sourceControlResponse, []byte, []byte, error) {
+	control := &cameraControl{socket: socket, sourceID: "camera"}
+	defer control.close()
+	return control.call(ctx, request)
+}
+func (control *cameraControl) call(ctx context.Context, request sourceControlRequest) (sourceControlResponse, []byte, []byte, error) {
 	timeout := sourceControlRequestTimeout
-	if request.Operation == "snapshot" {
-		// A 4K snapshot includes JPEG plus roughly 24 MiB of exact RGB data.
-		// Keep it bounded without imposing the low-latency lifecycle deadline.
+	if request.Operation == "capture" {
 		timeout = sourceSnapshotRequestTimeout
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	dialer := net.Dialer{}
-	connection, err := dialer.DialContext(ctx, "unix", socket)
+	client, err := control.transport(ctx)
 	if err != nil {
-		return sourceControlResponse{}, nil, nil, fmt.Errorf("connect capture source: %w", err)
+		return sourceControlResponse{}, nil, nil, err
 	}
-	defer connection.Close()
-	if deadline, found := ctx.Deadline(); found {
-		_ = connection.SetDeadline(deadline)
+	if request.Operation != "describe" && request.Operation != "status" && request.Operation != "config" && request.Operation != "configure" && request.Operation != "start" && request.Operation != "stop" && request.Operation != "request-keyframe" && request.Operation != "capture" {
+		return sourceControlResponse{}, nil, nil, errors.New("unknown camera route")
 	}
-	stopCancellation := context.AfterFunc(ctx, func() {
-		_ = connection.SetDeadline(time.Now())
-	})
-	defer stopCancellation()
-	if err := json.NewEncoder(connection).Encode(request); err != nil {
-		return sourceControlResponse{}, nil, nil, fmt.Errorf("write capture source request: %w", err)
-	}
-	// Bound allocation before finding the delimiter. Keep this same reader for
-	// binary payloads: a header-only LimitReader would truncate valid snapshots.
-	reader := bufio.NewReaderSize(connection, maximumControlHeaderBytes+1)
-	header, err := reader.ReadSlice('\n')
-	if errors.Is(err, bufio.ErrBufferFull) || len(header) > maximumControlHeaderBytes {
-		return sourceControlResponse{}, nil, nil, errors.New("capture source response header is too large")
-	}
+	body, err := json.Marshal(request)
 	if err != nil {
-		return sourceControlResponse{}, nil, nil, fmt.Errorf("read capture source response: %w", err)
+		return sourceControlResponse{}, nil, nil, err
+	}
+	id, err := newSnapshotID()
+	if err != nil {
+		return sourceControlResponse{}, nil, nil, err
+	}
+	method, kind := http.MethodPost, "application/json"
+	if request.Operation == "describe" || request.Operation == "status" || request.Operation == "config" {
+		method, kind, body = http.MethodGet, "", nil
+	}
+	if !stableSourceID.MatchString(control.sourceID) {
+		return sourceControlResponse{}, nil, nil, errors.New("camera source ID is required")
+	}
+	path := "/v1/media/sources/" + control.sourceID
+	if request.Operation == "configure" {
+		method = http.MethodPatch
+		path += "/config"
+	} else {
+		path += "/" + request.Operation
+	}
+	reply, err := client.DoStream(ctx, method, path, id, kind, body)
+	if err != nil {
+		return sourceControlResponse{}, nil, nil, err
+	}
+	defer reply.Body.Close()
+	if reply.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(io.LimitReader(reply.Body, maximumControlHeaderBytes))
+		return sourceControlResponse{}, nil, nil, fmt.Errorf("camera HTTP %d: %s", reply.StatusCode, data)
+	}
+	if request.Operation == "capture" {
+		maxBytes := control.maxCaptureBytes
+		if maxBytes == 0 {
+			maxBytes = 64 << 20
+		}
+		return readCameraMultipartWithLimit(reply.Header.Get("Content-Type"), reply.Body, request.IncludeRGB == nil || *request.IncludeRGB, maxBytes)
+	}
+	metadata, err := io.ReadAll(io.LimitReader(reply.Body, maximumControlHeaderBytes+1))
+	if err != nil {
+		return sourceControlResponse{}, nil, nil, err
+	}
+	if len(metadata) > maximumControlHeaderBytes {
+		return sourceControlResponse{}, nil, nil, errors.New("camera metadata is too large")
 	}
 	var response sourceControlResponse
-	if err := json.Unmarshal(header, &response); err != nil {
-		return sourceControlResponse{}, nil, nil, fmt.Errorf("decode capture source response: %w", err)
+	if err = json.Unmarshal(metadata, &response); err != nil {
+		return response, nil, nil, err
 	}
 	if !response.OK {
-		message := strings.TrimSpace(response.Error)
-		if message == "" {
-			message = "capture source rejected the request"
+		return response, nil, nil, fmt.Errorf("camera rejected request: %s", response.Error)
+	}
+	if (request.Operation == "start" || request.Operation == "stop") &&
+		(response.ManagedSourceID != control.sourceID || response.Completion != "applied" || response.Active != (request.Operation == "start") || response.ConfigurationRevision == 0 || (request.Operation == "start" && response.State != "active") || (request.Operation == "stop" && response.State != "idle")) {
+		return response, nil, nil, errors.New("camera lifecycle omitted native applied completion")
+	}
+	return response, nil, nil, nil
+}
+func readCameraMultipart(contentType string, body io.Reader, includeRGB bool) (sourceControlResponse, []byte, []byte, error) {
+	return readCameraMultipartWithLimit(contentType, body, includeRGB, maximumCameraJPEGBytes+maximumCameraRGBBytes)
+}
+func readCameraMultipartWithLimit(contentType string, body io.Reader, includeRGB bool, maxBytes int64) (sourceControlResponse, []byte, []byte, error) {
+	fail := func(err error) (sourceControlResponse, []byte, []byte, error) {
+		return sourceControlResponse{}, nil, nil, err
+	}
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil || mediaType != "multipart/mixed" || params["boundary"] == "" || len(params["boundary"]) > 70 {
+		return fail(errors.New("camera snapshot requires multipart/mixed"))
+	}
+	// Limit each native parser phase before allocation, including MIME preamble
+	// and headers. mime/multipart buffers at most 4096 read-ahead bytes between
+	// phases. We use NextRawPart and reject transfer encodings rather than
+	// allowing a second decoded representation to evade byte accounting.
+	bounded := &cameraPhaseReader{reader: body}
+	reader := multipart.NewReader(bounded, params["boundary"])
+	nextPart := func() (*multipart.Part, error) {
+		bounded.remaining = maximumCameraPartHeaderBytes
+		part, err := reader.NextRawPart()
+		if err != nil {
+			return nil, err
 		}
-		return sourceControlResponse{}, nil, nil, errors.New(message)
+		for name, values := range part.Header {
+			if len(values) != 1 || (name != "Content-Type" && name != "Content-Disposition" && name != "Content-Length") {
+				return nil, errors.New("camera MIME headers are invalid")
+			}
+		}
+		if part.Header.Get("Content-Type") == "" || part.Header.Get("Content-Disposition") == "" {
+			return nil, errors.New("camera MIME headers are incomplete")
+		}
+		return part, nil
 	}
-	if request.Operation != "snapshot" {
-		return response, nil, nil, nil
+	part, err := nextPart()
+	if err != nil {
+		return fail(err)
 	}
-	includeRGB := request.IncludeRGB == nil || *request.IncludeRGB
-	if response.JPEGBytes < 2 || response.JPEGBytes > 32<<20 ||
-		(includeRGB && (response.RGBBytes < 1 || response.RGBBytes > 128<<20)) ||
-		(!includeRGB && response.RGBBytes != 0 &&
-			(response.RGBBytes < 1 || response.RGBBytes > 128<<20)) {
-		return sourceControlResponse{}, nil, nil, errors.New("capture source snapshot sizes are invalid")
+	if cameraPartName(part) != "metadata" || part.Header.Get("Content-Type") != "application/json" {
+		return fail(errors.New("camera first part must be metadata JSON"))
 	}
-	jpeg := make([]byte, response.JPEGBytes)
-	if _, err := io.ReadFull(reader, jpeg); err != nil {
-		return sourceControlResponse{}, nil, nil, fmt.Errorf("read capture JPEG: %w", err)
+	bounded.remaining = maximumControlHeaderBytes + 4096
+	metadata, err := io.ReadAll(io.LimitReader(part, maximumControlHeaderBytes+1))
+	if err != nil {
+		return fail(err)
 	}
-	rgb := make([]byte, response.RGBBytes)
-	if _, err := io.ReadFull(reader, rgb); err != nil {
-		return sourceControlResponse{}, nil, nil, fmt.Errorf("read capture RGB: %w", err)
+	if len(metadata) > maximumControlHeaderBytes {
+		return fail(errors.New("camera metadata is too large"))
+	}
+	if err := checkCameraPartLength(part, len(metadata)); err != nil {
+		return fail(err)
+	}
+	var response sourceControlResponse
+	if err = json.Unmarshal(metadata, &response); err != nil {
+		return fail(err)
+	}
+	if !response.OK || response.JPEGBytes < 2 || response.JPEGBytes > maximumCameraJPEGBytes || response.RGBBytes < 0 || response.RGBBytes > maximumCameraRGBBytes || (includeRGB && response.RGBBytes == 0) || (!includeRGB && response.RGBBytes != 0) {
+		return fail(errors.New("capture source snapshot sizes are invalid"))
+	}
+	if int64(response.JPEGBytes)+int64(response.RGBBytes) > maxBytes {
+		return fail(errors.New("camera snapshot exceeds capture byte budget"))
+	}
+	readPart := func(name, kind string, size int) ([]byte, error) {
+		part, err := nextPart()
+		if err != nil {
+			return nil, err
+		}
+		if cameraPartName(part) != name || part.Header.Get("Content-Type") != kind {
+			return nil, fmt.Errorf("expected camera %s part", name)
+		}
+		if err := checkCameraPartLength(part, size); err != nil {
+			return nil, err
+		}
+		bounded.remaining = int64(size) + 4096
+		data := make([]byte, size)
+		if _, err = io.ReadFull(part, data); err != nil {
+			return nil, err
+		}
+		var extra [1]byte
+		if n, err := part.Read(extra[:]); n != 0 || err != io.EOF {
+			return nil, fmt.Errorf("camera %s size mismatch", name)
+		}
+		return data, nil
+	}
+	jpeg, err := readPart("jpeg", "image/jpeg", response.JPEGBytes)
+	if err != nil {
+		return fail(err)
+	}
+	var rgb []byte
+	if response.RGBBytes > 0 {
+		rgb, err = readPart("rgb", "application/octet-stream", response.RGBBytes)
+		if err != nil {
+			return fail(err)
+		}
+	}
+	if _, err = nextPart(); err != io.EOF {
+		return fail(errors.New("unexpected extra camera part"))
 	}
 	return response, jpeg, rgb, nil
+}
+
+func checkCameraPartLength(part *multipart.Part, size int) error {
+	value := part.Header.Get("Content-Length")
+	if value != "" && value != strconv.Itoa(size) {
+		return errors.New("camera MIME Content-Length mismatch")
+	}
+	return nil
+}
+
+type cameraPhaseReader struct {
+	reader    io.Reader
+	remaining int64
+}
+
+func (reader *cameraPhaseReader) Read(buffer []byte) (int, error) {
+	if reader.remaining <= 0 {
+		return 0, errors.New("camera MIME phase exceeds byte limit")
+	}
+	if int64(len(buffer)) > reader.remaining {
+		buffer = buffer[:reader.remaining]
+	}
+	n, err := reader.reader.Read(buffer)
+	reader.remaining -= int64(n)
+	return n, err
 }
 
 func newSnapshotID() (string, error) {
@@ -394,4 +672,12 @@ func newSnapshotID() (string, error) {
 		return "", fmt.Errorf("create snapshot ID: %w", err)
 	}
 	return hex.EncodeToString(value), nil
+}
+
+func cameraPartName(part *multipart.Part) string {
+	disposition, params, err := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+	if err != nil || disposition != "inline" || len(params) != 1 {
+		return ""
+	}
+	return params["name"]
 }

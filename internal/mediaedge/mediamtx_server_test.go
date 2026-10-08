@@ -177,7 +177,7 @@ func TestMediaMTXRecordingUsesNativeFMP4AndProductManifest(t *testing.T) {
 
 func activeControlRequest(active bool) func(sourceControlRequest) bool {
 	return func(request sourceControlRequest) bool {
-		return request.Operation == "set-active" && request.Active != nil && *request.Active == active
+		return (active && request.Operation == "start") || (!active && request.Operation == "stop")
 	}
 }
 
@@ -254,6 +254,13 @@ func (control *fakeMediaMTXControl) CloseWHEP(_ context.Context, location *url.U
 	}
 	delete(control.sessions, id)
 	return true, nil
+}
+
+func (control *fakeMediaMTXControl) KickWebRTCSession(_ context.Context, id string) error {
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	delete(control.sessions, id)
+	return nil
 }
 
 func (control *fakeMediaMTXControl) ConfigureRecording(

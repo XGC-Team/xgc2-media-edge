@@ -64,6 +64,7 @@ install -d \
   "${pkg_root}/usr/lib/xgc2-media-edge" \
   "${pkg_root}/usr/share/doc/${package_name}"
 install -m 0755 "${binary}" "${pkg_root}/usr/bin/xgc-media-edge"
+install -m 0755 "${repo_root}/scripts/prepare_runtime.py" "${pkg_root}/usr/lib/xgc2-media-edge/prepare-runtime"
 install -m 0755 "${mediamtx_root}/mediamtx" \
   "${pkg_root}/usr/lib/xgc2-media-edge/mediamtx"
 install -m 0644 "${repo_root}/LICENSE" \
@@ -78,7 +79,7 @@ Section: net
 Priority: optional
 Architecture: ${arch}
 Maintainer: XGC2 <apt@example.com>
-Depends: ca-certificates
+Depends: ca-certificates, python3
 Description: Target-resident XGC2 media lifecycle and MediaMTX gateway
  Controls co-located ROS, camera, and simulator adapters while pinned MediaMTX
  handles H264/RTP ingest, WHEP/WebRTC fanout, and stream-copy fMP4 recording.

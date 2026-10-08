@@ -3,10 +3,12 @@ package mediamtx
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -120,5 +122,83 @@ func newTestClient(t *testing.T, base string) *Client {
 	if err != nil {
 		t.Fatalf("create MediaMTX client: %v", err)
 	}
+	t.Cleanup(func() { _ = client.Close() })
 	return client
+}
+
+func TestClientBoundedInventoryAndNativeKickUUID(t *testing.T) {
+	const apiID = "01234567-89ab-cdef-0123-456789abcdef"
+	incomplete := false
+	kicks := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v3/webrtcsessions/list":
+			if r.Method != http.MethodGet || r.URL.Query().Get("itemsPerPage") != "1024" {
+				t.Error("session inventory did not request a finite full page")
+			}
+			count, pages := 1, 1
+			if incomplete {
+				count, pages = 1025, 2
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{map[string]any{"id": apiID, "path": "front", "state": "read", "query": "xgcSession=token"}}, "itemCount": count, "pageCount": pages})
+		case "/v3/webrtcsessions/kick/" + apiID:
+			if r.Method != http.MethodPost {
+				t.Error("native kick method must be POST")
+			}
+			kicks++
+			if kicks > 1 {
+				w.WriteHeader(404)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+	items, err := client.WebRTCSessions(t.Context())
+	if err != nil || len(items) != 1 || items[0].ID != apiID {
+		t.Fatalf("inventory: %v %v", items, err)
+	}
+	if err := client.KickWebRTCSession(t.Context(), items[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.KickWebRTCSession(t.Context(), items[0].ID); err != nil {
+		t.Fatalf("already absent UUID: %v", err)
+	}
+	incomplete = true
+	if _, err := client.WebRTCSessions(t.Context()); err == nil {
+		t.Fatal("partial native inventory was treated as authoritative absence")
+	}
+}
+
+func TestNativeWHEPCreationLostResponseIsNotReplayed(t *testing.T) {
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+			return
+		}
+		posts.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		connection, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = connection.Close()
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+	// First create a reusable connection, then lose the mutation response.
+	if _, err := client.Paths(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.OpenWHEP(t.Context(), "front", "v=0\r\n", "one-token"); err == nil {
+		t.Fatal("lost response reported success")
+	}
+	if posts.Load() != 1 {
+		t.Fatalf("native transport replayed creation %d times", posts.Load())
+	}
 }

@@ -1,6 +1,11 @@
 package mediaedge
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+var ErrMediaCapacity = errors.New("media edge capacity is exhausted")
 
 // Baseline profile, Level 5.1: 4K at 30 fps exceeds the macroblock-rate
 // limits of the previously advertised Level 3.1 contract.
@@ -40,18 +45,26 @@ type sourceDescription struct {
 // SourceStatus is intentionally metadata-only and never exposes RTP or a frame
 // payload. Counters mirror fields actually reported by the MediaMTX path API.
 type SourceStatus struct {
-	ID            string    `json:"id"`
-	Active        bool      `json:"active"`
-	Available     bool      `json:"available"`
-	Online        bool      `json:"online"`
-	Consumers     int       `json:"consumers"`
-	Viewers       int       `json:"viewers"`
-	RecordingID   string    `json:"recordingId,omitempty"`
-	LastPacketAt  time.Time `json:"lastPacketAt,omitempty"`
-	BytesReceived uint64    `json:"bytesReceived"`
-	FramesInError uint64    `json:"framesInError"`
-	Width         int       `json:"width"`
-	Height        int       `json:"height"`
-	FPS           float64   `json:"fps"`
-	FrameID       string    `json:"frameId"`
+	ID                    string    `json:"id"`
+	Active                bool      `json:"active"`
+	Available             bool      `json:"available"`
+	Online                bool      `json:"online"`
+	Consumers             int       `json:"consumers"`
+	Viewers               int       `json:"viewers"`
+	RecordingID           string    `json:"recordingId,omitempty"`
+	LastPacketAt          time.Time `json:"lastPacketAt,omitempty"`
+	BytesReceived         uint64    `json:"bytesReceived"`
+	FramesInError         uint64    `json:"framesInError"`
+	Width                 int       `json:"width"`
+	Height                int       `json:"height"`
+	FPS                   float64   `json:"fps"`
+	FrameID               string    `json:"frameId"`
+	StateUncertain        bool      `json:"stateUncertain"`
+	ControlHealthy        bool      `json:"controlHealthy"`
+	ControlError          string    `json:"controlError,omitempty"`
+	ControlInstanceID     string    `json:"controlInstanceId,omitempty"`
+	ControlObservedAt     time.Time `json:"controlObservedAt,omitempty"`
+	NativeState           string    `json:"nativeState,omitempty"`
+	NativeAppliedActive   bool      `json:"nativeAppliedActive"`
+	ConfigurationRevision uint64    `json:"configurationRevision"`
 }

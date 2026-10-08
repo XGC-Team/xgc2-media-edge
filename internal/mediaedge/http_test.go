@@ -229,8 +229,7 @@ func TestRemoteHTTPPublishesOnlyPlayerHealthAndSessions(t *testing.T) {
 		"192.0.2.44:42000",
 		map[string]string{"Content-Type": "application/json"},
 	)
-	if snapshot.Code != http.StatusForbidden ||
-		!strings.Contains(snapshot.Body.String(), "loopback-only") {
+	if snapshot.Code != http.StatusNotFound {
 		t.Fatalf("remote snapshot returned %d: %s", snapshot.Code, snapshot.Body.String())
 	}
 
@@ -383,7 +382,7 @@ func TestCORSUsesExactOriginsAndMinimalPreflight(t *testing.T) {
 		"192.0.2.44:42000",
 		headers,
 	)
-	if remoteSnapshot.Code != http.StatusForbidden {
+	if remoteSnapshot.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("remote snapshot preflight returned %d", remoteSnapshot.Code)
 	}
 }

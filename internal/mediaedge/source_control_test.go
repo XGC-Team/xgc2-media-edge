@@ -1,10 +1,14 @@
 package mediaedge
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	xrpc "github.com/XGC-Team/xgc2-xrpc/go"
+	"mime/multipart"
 	"net"
+	"net/http"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,7 +20,7 @@ import (
 
 func TestDescribeSourceRejectsMissingFreshSnapshotCapability(t *testing.T) {
 	description := defaultCaptureDescription()
-	description.Capabilities = []string{"set-active", "request-keyframe", "snapshot"}
+	description.Capabilities = []string{"start", "stop", "request-keyframe", "capture"}
 	control := newCaptureControlWithDescription(t, description)
 	defer control.close()
 	address := availableLoopbackRTPAddress(t)
@@ -32,6 +36,7 @@ func TestDescribeSourceRejectsMissingFreshSnapshotCapability(t *testing.T) {
 type captureControl struct {
 	socket              string
 	listener            net.Listener
+	server              *http.Server
 	requests            chan sourceControlRequest
 	closed              chan struct{}
 	beforeReply         func(sourceControlRequest)
@@ -82,28 +87,31 @@ func newCaptureControlAtWithHookAndDescription(
 		socket: socket, listener: listener, requests: make(chan sourceControlRequest, 16),
 		closed: make(chan struct{}), beforeReply: beforeReply, description: description,
 	}
-	go control.accept()
+	target, _ := os.Hostname()
+	control.description.ServiceRef = &xrpc.ServiceRef{TargetID: target, Service: "camera-source", APIVersion: "v1", InstanceID: "test-instance", Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: socket}}
+	control.server = &http.Server{Handler: http.HandlerFunc(control.handle), ReadHeaderTimeout: time.Second}
+	go control.server.Serve(listener)
 	return control
 }
 
-func (control *captureControl) accept() {
-	for {
-		connection, err := control.listener.Accept()
-		if err != nil {
-			return
-		}
-		go control.handle(connection)
-	}
-}
-
-func (control *captureControl) handle(connection net.Conn) {
-	defer connection.Close()
-	line, err := bufio.NewReader(connection).ReadString('\n')
-	if err != nil {
+func (control *captureControl) handle(writer http.ResponseWriter, incoming *http.Request) {
+	writer.Header().Set("X-Xrpc-Instance-ID", "test-instance")
+	writer.Header().Set("Content-Type", "application/json")
+	var request sourceControlRequest
+	if incoming.Method != http.MethodGet && json.NewDecoder(incoming.Body).Decode(&request) != nil {
+		writer.WriteHeader(400)
 		return
 	}
-	var request sourceControlRequest
-	if json.Unmarshal([]byte(line), &request) != nil {
+	request.Operation = pathBase(incoming.URL.Path)
+	if incoming.URL.Path != "/v1/describe" && incoming.URL.Path != "/v1/media/sources/camera" && !strings.HasPrefix(incoming.URL.Path, "/v1/media/sources/camera/") {
+		writer.WriteHeader(404)
+		return
+	}
+	if incoming.URL.Path == "/v1/media/sources/camera/describe" {
+		request.Operation = "describe"
+	}
+	if request.Operation == "describe" && incoming.Method != http.MethodGet {
+		writer.WriteHeader(405)
 		return
 	}
 	select {
@@ -119,11 +127,15 @@ func (control *captureControl) handle(connection net.Conn) {
 		description := control.description
 		control.descriptionMu.RUnlock()
 		encoded, _ := json.Marshal(description)
-		_, _ = connection.Write(append(encoded, '\n'))
+		_, _ = writer.Write(encoded)
 		return
 	}
-	if request.Operation != "snapshot" {
-		_, _ = connection.Write([]byte("{\"ok\":true}\n"))
+	if request.Operation != "capture" {
+		state := "idle"
+		if request.Operation == "start" {
+			state = "active"
+		}
+		_ = json.NewEncoder(writer).Encode(sourceControlResponse{OK: true, ManagedSourceID: "camera", Active: request.Operation == "start", Completion: "applied", State: state, ConfigurationRevision: 1})
 		return
 	}
 	rgb := make([]byte, 16*16*3)
@@ -136,7 +148,7 @@ func (control *captureControl) handle(connection net.Conn) {
 	poseFrameID := control.snapshotPoseFrameID
 	control.descriptionMu.RUnlock()
 	response := sourceControlResponse{
-		OK: true, SnapshotID: request.SnapshotID, FrameID: "camera_optical",
+		OK: true, SourceID: "camera", SnapshotID: request.SnapshotID, FrameID: "camera_optical", Sequence: 1,
 		TimestampNanoseconds: 1700000000000000000, TimestampClockDomain: "simulation",
 		Width: 16, Height: 16, PixelFormat: "rgb8", JPEGBytes: len(jpeg), RGBBytes: len(rgb),
 		CameraMatrix: []float64{5, 0, 8, 0, 5, 8, 0, 0, 1}, Distortion: []float64{0, 0, 0, 0, 0},
@@ -144,20 +156,19 @@ func (control *captureControl) handle(connection net.Conn) {
 		JPEGReadbackMillis: 0.25, JPEGEncodeMillis: 0,
 		RenderPose: renderPose, PoseFrameID: poseFrameID,
 	}
-	encoded, _ := json.Marshal(response)
-	_, _ = connection.Write(append(encoded, '\n'))
-	_, _ = connection.Write(jpeg)
-	_, _ = connection.Write(rgb)
+	contentType, body := cameraMultipartFixture(response, jpeg, rgb)
+	writer.Header().Set("Content-Type", contentType)
+	_, _ = writer.Write(body)
 }
 
 func defaultCaptureDescription() sourceControlResponse {
 	return sourceControlResponse{
-		OK: true, ProtocolVersion: sourceControlProtocolVersion,
+		OK: true, ProtocolVersion: sourceControlProtocolVersion, KeyframeRequestSupported: true, KeyframePolicy: "native-request",
 		SourceID: "camera", Codec: sourceCodec,
 		RTPPayloadType: sourceRTPPayloadType, RTPClockRate: h264RTPClockRate,
 		RTPHost: "127.0.0.1", RTPPort: 5004,
 		Width: 16, Height: 16, FPS: 20, FrameID: "camera_optical",
-		Capabilities: append([]string(nil), requiredSourceCapabilities[:]...),
+		Capabilities: append(append([]string(nil), requiredSourceCapabilities[:]...), "request-keyframe"),
 	}
 }
 
@@ -225,6 +236,7 @@ func (control *captureControl) expectNoMatch(t *testing.T, duration time.Duratio
 func (control *captureControl) close() {
 	control.once.Do(func() {
 		close(control.closed)
+		_ = control.server.Close()
 		_ = control.listener.Close()
 		_ = os.Remove(control.socket)
 	})
@@ -240,4 +252,25 @@ func eventually(t *testing.T, timeout time.Duration, predicate func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("condition did not become true before timeout")
+}
+
+func cameraMultipartFixture(metadata any, jpeg, rgb []byte) (string, []byte) {
+	var buffer bytes.Buffer
+	writer := multipart.NewWriter(&buffer)
+	raw, _ := json.Marshal(metadata)
+	for _, part := range []struct {
+		name, kind string
+		data       []byte
+	}{{"metadata", "application/json", raw}, {"jpeg", "image/jpeg", jpeg}, {"rgb", "application/octet-stream", rgb}} {
+		if part.name == "rgb" && len(part.data) == 0 {
+			continue
+		}
+		header := textproto.MIMEHeader{}
+		header.Set("Content-Type", part.kind)
+		header.Set("Content-Disposition", `inline; name="`+part.name+`"`)
+		out, _ := writer.CreatePart(header)
+		out.Write(part.data)
+	}
+	writer.Close()
+	return "multipart/mixed; boundary=" + writer.Boundary(), buffer.Bytes()
 }
