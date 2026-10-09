@@ -427,3 +427,5 @@ tests Focal, Jammy, and Noble packages on native amd64 and arm64 runners.
 
 This repository uses the BSD 3-Clause License, matching the permissive license
 style already used by the XGC2 common product repositories. See [LICENSE](LICENSE).
+
+`xgc-media-edge capture` reads one JSON object from stdin: the actual `service` reference, `sourceId`, existing absolute `artifactRoot`, `imageFormat` (`jpeg` or `png`), `includeRawRGB`, and `label`. It writes an atomically committed same-frame image/metadata bundle and returns its paths as JSON. The service reference remains instance-bound; the command releases native snapshot retention after reading the response. Use an ordinary finite process node; Core does not need camera-specific nodes or source addresses.
