@@ -38,7 +38,7 @@ ownership:
   - /usr/lib/xgc2-media-edge/mediamtx
   - /usr/lib/xgc2-media-edge/prepare-runtime
 release:
-  repository: lxk36/xgc2-media-edge
+  repository: XGC-Team/xgc2-media-edge
   ref: main
   workflow: release.yml
   ci_workflow: ci.yml
