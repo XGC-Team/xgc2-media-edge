@@ -96,7 +96,7 @@ func TestRealPythonSourceControlAndEdgeCapture(t *testing.T) {
 		}
 	}
 	first := ready()
-	config, err := (Config{ControlAddress: "127.0.0.1:0", RPCSocket: filepath.Join(directory, "edge", "control.sock"), SessionGracePeriod: time.Hour, Sources: []SourceConfig{{ID: "python-camera", RTPListenAddress: address, ControlSocket: socket}}}).normalized()
+	config, err := (Config{TargetID: "python-fixture", ControlAddress: "127.0.0.1:0", RPCSocket: filepath.Join(directory, "edge", "control.sock"), SessionGracePeriod: time.Hour, Sources: []SourceConfig{{ID: "python-camera", RTPListenAddress: address, ControlSocket: socket}}}).normalized()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestRealPythonSourceControlAndEdgeCapture(t *testing.T) {
 		edge.sources["python-camera"].cameraControl().close()
 	}()
 	// Discover the real edge host, then bind its fresh process incarnation.
-	target, _ := os.Hostname()
+	target := config.TargetID
 	ref := xrpc.ServiceRef{TargetID: target, Service: "media-edge", APIVersion: "v1", Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: config.RPCSocket}}
 	client, err := httpx.New(httpx.Config{LocalTargetID: target, Service: ref, MaxResponseBytes: 1 << 20})
 	if err != nil {
@@ -242,7 +242,7 @@ func TestRealPythonSourceControlAndEdgeCapture(t *testing.T) {
 	clientContext, clientCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer clientCancel()
 	outputFile := filepath.Join(directory, "client-capture.jpg")
-	clientCommand := exec.CommandContext(clientContext, "go", "run", filepath.Join("..", "..", "examples", "capture_client"), "--rpc-socket", config.RPCSocket, "--source", "python-camera", "--output", outputFile)
+	clientCommand := exec.CommandContext(clientContext, "go", "run", filepath.Join("..", "..", "examples", "capture_client"), "--target-id", config.TargetID, "--rpc-socket", config.RPCSocket, "--source", "python-camera", "--output", outputFile)
 	if output, err := clientCommand.CombinedOutput(); err != nil {
 		t.Fatalf("real SDK capture client example: %v: %s", err, output)
 	}

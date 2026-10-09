@@ -8,7 +8,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
-	"os"
 	"strings"
 
 	xrpc "github.com/XGC-Team/xgc2-xrpc/go"
@@ -20,12 +19,13 @@ func (server *MediaMTXServer) startRPC() error {
 	if server.config.RPCSocket == "" {
 		return nil
 	}
-	target, err := os.Hostname()
+	instanceID, err := newSnapshotID()
 	if err != nil {
 		return err
 	}
-	server.instanceID, err = newSnapshotID()
-	if err != nil {
+	server.instanceID = instanceID
+	reference := xrpc.ServiceRef{TargetID: server.config.TargetID, Service: "media-edge", APIVersion: "v1", InstanceID: server.instanceID, Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: server.config.RPCSocket}}
+	if err := reference.ValidateInternal(); err != nil {
 		return err
 	}
 	lease, err := unixlease.Reserve(server.lifecycleContext, server.config.RPCSocket, unixlease.Options{ExistingPath: unixlease.ReclaimUnreachable})
@@ -37,7 +37,6 @@ func (server *MediaMTXServer) startRPC() error {
 		_ = lease.Close()
 		return err
 	}
-	reference := xrpc.ServiceRef{TargetID: target, Service: "media-edge", APIVersion: "v1", InstanceID: server.instanceID, Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: server.config.RPCSocket}}
 	options, err := server.config.hostOptions(true)
 	if err != nil {
 		_ = listener.Close()

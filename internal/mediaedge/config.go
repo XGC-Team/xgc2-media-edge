@@ -45,6 +45,7 @@ const (
 // target interface for direct browser signaling. Browser media candidates are
 // created by MediaMTX and can use direct ICE or a configured TURN service.
 type Config struct {
+	TargetID                 string
 	ControlAddress           string
 	RPCSocket                string
 	AllowedOrigins           []string
@@ -103,6 +104,9 @@ type SourceConfig struct {
 }
 
 func (config Config) normalized() (Config, error) {
+	if config.RPCSocket != "" && (config.TargetID == "" || strings.TrimSpace(config.TargetID) != config.TargetID) {
+		return Config{}, errors.New("media edge RPC requires an explicit execution target identity")
+	}
 	if config.RPCSocket != "" && (!filepath.IsAbs(config.RPCSocket) || filepath.Clean(config.RPCSocket) != config.RPCSocket || len(config.RPCSocket) >= 108 || strings.ContainsAny(config.RPCSocket, "\x00\r\n")) {
 		return Config{}, errors.New("media edge RPC socket must be a canonical absolute Unix path shorter than 108 bytes")
 	}

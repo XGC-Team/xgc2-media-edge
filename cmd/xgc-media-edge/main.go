@@ -23,6 +23,7 @@ func main() {
 	var (
 		controlAddress           = flag.String("control-address", "127.0.0.1:18090", "HTTP listen address; explicitly bind a target interface for remote browsers")
 		rpcSocket                = flag.String("rpc-socket", "", "required granted private XRPC socket beneath an owned 0700 runtime directory")
+		targetID                 = flag.String("target-id", "", "required execution target identity for the native service reference")
 		maxSessions              = flag.Int("max-sessions", 32, "maximum active and negotiating WebRTC sessions")
 		maxOperations            = flag.Int("max-operations", 16, "maximum concurrent source domain operations")
 		maxCaptureBytes          = flag.Int64("max-capture-bytes", 64<<20, "maximum JPEG plus RGB bytes per immutable capture")
@@ -34,7 +35,8 @@ func main() {
 		mediaMTXICEUDPAddress    = flag.String("webrtc-ice-udp-address", "0.0.0.0:18189", "MediaMTX fixed WebRTC ICE UDP listener")
 		mediaMTXICETCPAddress    = flag.String("webrtc-ice-tcp-address", "", "optional MediaMTX fixed WebRTC ICE TCP listener")
 		mediaMTXInterfaceIPs     = flag.Bool("webrtc-interface-ips", true, "advertise target interface IPs as ICE candidates")
-		sourcesConfig            = flag.String("sources-config", "", "required JSON file containing one or more local media sources")
+		sourcesConfig            = flag.String("sources-config", "", "JSON file containing local media sources")
+		sourcesStdin             = flag.Bool("sources-stdin", false, "read local media sources JSON from standard input")
 		allowedOrigins           multiString
 		publicIPs                multiString
 		iceURLs                  multiString
@@ -42,6 +44,7 @@ func main() {
 		iceCredential            = flag.String("ice-credential", "", "optional shared TURN credential")
 		grace                    = flag.Duration("session-grace", 10*time.Second, "idle source stop delay")
 		snapshotTTL              = flag.Duration("snapshot-ttl", 15*time.Second, "immutable snapshot retention")
+		recordingEnabled         = flag.Bool("recording-enabled", false, "enable local stream-copy recording with an explicit root and peak bitrate")
 		recordingRoot            = flag.String("recording-root", "", "absolute local recording root; empty disables recording")
 		recordingMaxBitrate      = flag.Uint64("recording-max-bitrate", 0, "configured source peak bitrate in bits/s; required with --recording-root")
 		recordingSegment         = flag.Duration("recording-segment-duration", 0, "target segment duration; cuts at the next IDR, default 5m")
@@ -64,11 +67,27 @@ func main() {
 		log.Fatal("--rpc-socket is required; grant an owned private runtime directory before startup")
 	}
 
-	sources, err := resolveSources(*sourcesConfig)
+	var sources []mediaedge.SourceConfig
+	var err error
+	if *sourcesStdin {
+		if *sourcesConfig != "" {
+			log.Fatal("choose one sources input")
+		}
+		sources, err = readSources(os.Stdin)
+	} else {
+		sources, err = resolveSources(*sourcesConfig)
+	}
 	if err != nil {
 		log.Fatalf("invalid XGC media-edge source configuration: %v", err)
 	}
+	if !*recordingEnabled {
+		*recordingRoot = ""
+		*recordingMaxBitrate = 0
+	} else if *recordingRoot == "" || *recordingMaxBitrate == 0 {
+		log.Fatal("recording requires an explicit root and positive peak bitrate")
+	}
 	config := mediaedge.Config{
+		TargetID:                 *targetID,
 		ControlAddress:           *controlAddress,
 		RPCSocket:                *rpcSocket,
 		MaxSessions:              *maxSessions,

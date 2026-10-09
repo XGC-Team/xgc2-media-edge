@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,7 +41,18 @@ func loadSources(path string) ([]mediaedge.SourceConfig, error) {
 		return nil, fmt.Errorf("sources config exceeds %d bytes", maximumSourcesConfigBytes)
 	}
 
-	decoder := json.NewDecoder(io.LimitReader(file, maximumSourcesConfigBytes+1))
+	return readSources(file)
+}
+
+func readSources(reader io.Reader) ([]mediaedge.SourceConfig, error) {
+	raw, err := io.ReadAll(io.LimitReader(reader, maximumSourcesConfigBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maximumSourcesConfigBytes {
+		return nil, fmt.Errorf("sources config exceeds %d bytes", maximumSourcesConfigBytes)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	var document sourcesDocument
 	if err := decoder.Decode(&document); err != nil {

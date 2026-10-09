@@ -26,22 +26,19 @@ const maxPartHeader = 16 << 10
 
 func main() {
 	socket := flag.String("rpc-socket", "", "granted media-edge Unix endpoint")
+	target := flag.String("target-id", "", "execution target identity")
 	source := flag.String("source", "", "configured source ID")
 	output := flag.String("output", "capture.jpg", "JPEG output; same-frame metadata goes to output.json")
 	flag.Parse()
-	if err := capture(*socket, *source, *output); err != nil {
+	if err := capture(*target, *socket, *source, *output); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func capture(socket, source, output string) (result error) {
-	if socket == "" || !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`).MatchString(source) {
-		return errors.New("rpc-socket and valid source are required")
-	}
-	target, err := os.Hostname()
-	if err != nil {
-		return err
+func capture(target, socket, source, output string) (result error) {
+	if target == "" || socket == "" || !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`).MatchString(source) {
+		return errors.New("target-id, rpc-socket and valid source are required")
 	}
 	ref := xrpc.ServiceRef{TargetID: target, Service: "media-edge", APIVersion: "v1", Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: socket}}
 	newClient := func(reference xrpc.ServiceRef) (*httpx.Client, error) {
