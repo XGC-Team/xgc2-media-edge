@@ -86,7 +86,7 @@ grep -q '^id: xgc2-media-edge$' .xgc2/product.yml
 grep -q '^  distribution: bionic,focal,jammy,noble$' .xgc2/product.yml
 grep -q '^  - /usr/bin/xgc-media-edge$' .xgc2/product.yml
 grep -q '^  - /usr/lib/xgc2-media-edge/mediamtx$' .xgc2/product.yml
-grep -q '^Depends: ca-certificates$' .xgc2/scripts/build_deb.sh
+grep -q '^Depends: ca-certificates, python3$' .xgc2/scripts/build_deb.sh
 if find internal/mediaedge -maxdepth 1 -type f \
   \( -name 'server.go' -o -name 'recording.go' -o -name 'recording_muxer.go' \
      -o -name 'h264_access_unit.go' -o -name 'rtp_continuity.go' \) | grep -q .; then
