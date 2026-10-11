@@ -1,0 +1,38 @@
+{
+  "name": "nvv4l2-v4l2src-mjpeg",
+  "description": "H.264 RTP stream from a motion-JPEG video device with the Jetson hardware encoder nvv4l2h264enc, plus a one frame per second JPEG snapshot branch.",
+  "input": "device",
+  "snapshot": true,
+  "parameters": {
+    "device": {
+      "description": "V4L2 device node",
+      "pattern": "/dev/[A-Za-z0-9_./-]{1,200}"
+    },
+    "bitrate": {
+      "description": "Target bitrate in bit/s",
+      "default": "2500000",
+      "pattern": "[0-9]{4,9}"
+    }
+  },
+  "command": [
+    "gst-launch-1.0", "-q", "v4l2src", "device=${device}", "do-timestamp=true", "!",
+    "image/jpeg,width=${width},height=${height},framerate=${fps}/1", "!",
+    "jpegdec", "!",
+    "videoconvert", "!",
+    "tee", "name=split",
+    "split.", "!",
+    "queue", "max-size-buffers=2", "leaky=downstream", "!",
+    "nvvidconv", "!",
+    "video/x-raw(memory:NVMM),format=NV12", "!",
+    "nvv4l2h264enc", "bitrate=${bitrate}", "iframeinterval=${fps}", "idrinterval=${fps}", "!",
+    "h264parse", "config-interval=1", "!",
+    "rtph264pay", "pt=${payloadType}", "config-interval=1", "mtu=1200", "!",
+    "udpsink", "host=${rtpHost}", "port=${rtpPort}", "sync=false", "async=false",
+    "split.", "!",
+    "queue", "max-size-buffers=1", "leaky=downstream", "!",
+    "videorate", "drop-only=true", "!",
+    "video/x-raw,framerate=1/1", "!",
+    "jpegenc", "quality=90", "!",
+    "multifilesink", "location=${snapshotDir}/snapshot-%05d.jpg", "max-files=2", "post-messages=false"
+  ]
+}

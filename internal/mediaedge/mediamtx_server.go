@@ -99,7 +99,7 @@ type MediaMTXServer struct {
 
 type mediaMTXSource struct {
 	controlOnce sync.Once
-	controlRPC  *cameraControl
+	controlRPC  sourceController
 	server      *MediaMTXServer
 	config      SourceConfig
 
@@ -339,7 +339,7 @@ func (server *MediaMTXServer) Start() (startErr error) {
 	sort.Strings(sourceIDs)
 	for _, sourceID := range sourceIDs {
 		source := server.sources[sourceID]
-		described, err := describeSourceWith(server.lifecycleContext, source.config, source.cameraControl())
+		described, err := describeSourceWith(server.lifecycleContext, source.config, source.controller())
 		if err != nil {
 			return fmt.Errorf("validate media source %q: %w", source.config.ID, err)
 		}
@@ -694,7 +694,7 @@ func (source *mediaMTXSource) acquire(ctx context.Context) error {
 		return nil
 	}
 	source.mu.Unlock()
-	if _, _, _, err := source.cameraControl().call(ctx, sourceControlRequest{
+	if _, _, _, err := source.controller().call(ctx, sourceControlRequest{
 		Operation: "start",
 	}); err != nil {
 		source.mu.Lock()
@@ -794,7 +794,7 @@ func (source *mediaMTXSource) deactivateIfUnused(epoch uint64) {
 	source.mu.Unlock()
 	ctx, cancel := context.WithTimeout(source.server.lifecycleContext, sourceControlRequestTimeout)
 	defer cancel()
-	_, _, _, err := source.cameraControl().call(ctx, sourceControlRequest{
+	_, _, _, err := source.controller().call(ctx, sourceControlRequest{
 		Operation: "stop",
 	})
 	source.mu.Lock()
@@ -834,7 +834,7 @@ func (source *mediaMTXSource) requestKeyframeAsync(force bool) {
 		defer func() { source.mu.Lock(); source.keyframePending = false; source.mu.Unlock() }()
 		ctx, cancel := context.WithTimeout(source.server.lifecycleContext, sourceControlRequestTimeout)
 		defer cancel()
-		_, _, _, _ = source.cameraControl().call(ctx, sourceControlRequest{
+		_, _, _, _ = source.controller().call(ctx, sourceControlRequest{
 			Operation: "request-keyframe",
 		})
 	}) {
@@ -1024,7 +1024,7 @@ func (source *mediaMTXSource) recover(epoch uint64) {
 	}
 	ctx, cancel := context.WithTimeout(source.server.lifecycleContext, sourceControlRequestTimeout)
 	defer cancel()
-	if _, _, _, err := source.cameraControl().call(ctx, sourceControlRequest{
+	if _, _, _, err := source.controller().call(ctx, sourceControlRequest{
 		Operation: "start",
 	}); err == nil {
 		source.requestKeyframeAsync(true)
@@ -1042,14 +1042,14 @@ func (server *MediaMTXServer) SourceStatuses() []SourceStatus {
 	for _, source := range sources {
 		source.mu.Lock()
 		statuses = append(statuses, SourceStatus{
-			ID: source.config.ID, Active: source.active, Available: source.available, Online: source.online,
+			ID: source.config.ID, Kind: source.config.Kind, Active: source.active, Available: source.available, Online: source.online,
 			Consumers: source.consumerCountLocked(), Viewers: len(source.sessions), RecordingID: source.recordingID,
 			LastPacketAt: source.lastPacketAt.UTC(), BytesReceived: source.inboundBytes,
 			FramesInError: source.framesInError, Width: source.config.Width, Height: source.config.Height,
 			FPS: source.config.FPS, FrameID: source.config.FrameID,
 			StateUncertain: source.deactivateUncertain, ControlHealthy: source.controlHealthy,
 			ControlError: source.controlError, ControlObservedAt: source.controlObservedAt,
-			ControlInstanceID: source.cameraControl().boundInstance(), NativeState: source.nativeStatus.State,
+			ControlInstanceID: source.controller().boundInstance(), NativeState: source.nativeStatus.State,
 			NativeAppliedActive: source.nativeStatus.AppliedActive, ConfigurationRevision: source.nativeStatus.ConfigurationRevision,
 		})
 		source.mu.Unlock()
@@ -1070,7 +1070,7 @@ func (source *mediaMTXSource) pollStatusAsync() {
 	source.statusPending = true
 	source.mu.Unlock()
 	if !source.server.startBackground(func() {
-		response, _, _, err := source.cameraControl().call(source.server.lifecycleContext, sourceControlRequest{Operation: "status"})
+		response, _, _, err := source.controller().call(source.server.lifecycleContext, sourceControlRequest{Operation: "status"})
 		source.mu.Lock()
 		defer source.mu.Unlock()
 		source.statusPending = false
@@ -1112,6 +1112,9 @@ func (server *MediaMTXServer) CaptureSnapshot(
 	if source == nil {
 		return Snapshot{}, fmt.Errorf("media source %q was not found", sourceID)
 	}
+	if !source.config.CaptureSupported {
+		return Snapshot{}, ErrCaptureUnsupported
+	}
 	source.mu.Lock()
 	if source.capturePending {
 		source.mu.Unlock()
@@ -1128,7 +1131,7 @@ func (server *MediaMTXServer) CaptureSnapshot(
 	if err != nil {
 		return Snapshot{}, err
 	}
-	response, jpeg, rgb, err := source.cameraControl().call(operationContext, sourceControlRequest{
+	response, jpeg, rgb, err := source.controller().call(operationContext, sourceControlRequest{
 		Operation: "capture", SnapshotID: id, IncludeRGB: request.IncludeRGB,
 		RequestKeyframe: request.RequestKeyframe, RequireFresh: request.RequireFresh,
 	})
@@ -1409,7 +1412,7 @@ func (server *MediaMTXServer) Close() error {
 		source.mu.Unlock()
 		if !stopped {
 			ctx, cancel := context.WithTimeout(context.Background(), sourceControlRequestTimeout)
-			_, _, _, err := source.cameraControl().call(ctx, sourceControlRequest{Operation: "stop"})
+			_, _, _, err := source.controller().call(ctx, sourceControlRequest{Operation: "stop"})
 			cancel()
 			source.mu.Lock()
 			if err != nil {
@@ -1424,11 +1427,11 @@ func (server *MediaMTXServer) Close() error {
 			}
 			source.mu.Unlock()
 			if err == nil {
-				source.cameraControl().close()
+				source.controller().close()
 			}
 		}
 		if stopped {
-			source.cameraControl().close()
+			source.controller().close()
 		}
 		source.lifecycleMu.Unlock()
 	}
@@ -1470,8 +1473,15 @@ func filepathJoinSlash(elements ...string) string {
 
 var _ httpBackend = (*MediaMTXServer)(nil)
 
-func (source *mediaMTXSource) cameraControl() *cameraControl {
+// controller is how this process drives the source: XRPC to a source process
+// that implements the camera-source contract, or an encoder pipeline that
+// media-edge runs itself.
+func (source *mediaMTXSource) controller() sourceController {
 	source.controlOnce.Do(func() {
+		if source.config.Kind == SourceKindPipeline {
+			source.controlRPC = newPipelineControl(source.config, source.server.settings.Stderr)
+			return
+		}
 		source.controlRPC = &cameraControl{socket: source.config.ControlSocket, instance: source.config.ControlInstanceID, sourceID: source.config.ID, maxCaptureBytes: source.server.config.MaxCaptureBytes, policy: source.server.config.RuntimePolicy}
 	})
 	return source.controlRPC

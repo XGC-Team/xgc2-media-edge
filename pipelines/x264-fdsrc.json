@@ -1,0 +1,37 @@
+{
+  "name": "x264-fdsrc",
+  "description": "H.264 RTP stream from raw frames that a producer writes to standard input with software x264, plus a one frame per second JPEG snapshot branch.",
+  "input": "stdin",
+  "snapshot": true,
+  "parameters": {
+    "format": {
+      "description": "Pixel format of the frames the producer writes, by rawvideoparse name: rgb, bgr or gray8",
+      "default": "bgr",
+      "pattern": "rgb|bgr|gray8"
+    },
+    "bitrateKbps": {
+      "description": "Target bitrate in kbit/s",
+      "default": "2500",
+      "pattern": "[0-9]{1,6}"
+    }
+  },
+  "command": [
+    "gst-launch-1.0", "-q", "fdsrc", "fd=0", "blocksize=262144", "!",
+    "rawvideoparse", "format=${format}", "width=${width}", "height=${height}", "framerate=${fps}/1", "!",
+    "videoconvert", "!",
+    "tee", "name=split",
+    "split.", "!",
+    "queue", "max-size-buffers=2", "leaky=downstream", "!",
+    "x264enc", "tune=zerolatency", "speed-preset=ultrafast", "key-int-max=${fps}", "bitrate=${bitrateKbps}", "byte-stream=true", "!",
+    "video/x-h264,profile=baseline", "!",
+    "h264parse", "config-interval=1", "!",
+    "rtph264pay", "pt=${payloadType}", "config-interval=1", "mtu=1200", "!",
+    "udpsink", "host=${rtpHost}", "port=${rtpPort}", "sync=false", "async=false",
+    "split.", "!",
+    "queue", "max-size-buffers=1", "leaky=downstream", "!",
+    "videorate", "drop-only=true", "!",
+    "video/x-raw,framerate=1/1", "!",
+    "jpegenc", "quality=90", "!",
+    "multifilesink", "location=${snapshotDir}/snapshot-%05d.jpg", "max-files=2", "post-messages=false"
+  ]
+}

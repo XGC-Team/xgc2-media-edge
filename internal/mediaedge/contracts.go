@@ -7,6 +7,9 @@ import (
 
 var ErrMediaCapacity = errors.New("media edge capacity is exhausted")
 
+// ErrCaptureUnsupported reports a source whose pipeline has no snapshot branch.
+var ErrCaptureUnsupported = errors.New("media source does not provide snapshots")
+
 // Baseline profile, Level 5.1: 4K at 30 fps exceeds the macroblock-rate
 // limits of the previously advertised Level 3.1 contract.
 const h264FMTP = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033"
@@ -59,6 +62,7 @@ type SourceStatus struct {
 	Height                int       `json:"height"`
 	FPS                   float64   `json:"fps"`
 	FrameID               string    `json:"frameId"`
+	Kind                  string    `json:"kind"`
 	StateUncertain        bool      `json:"stateUncertain"`
 	ControlHealthy        bool      `json:"controlHealthy"`
 	ControlError          string    `json:"controlError,omitempty"`

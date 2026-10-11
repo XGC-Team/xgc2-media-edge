@@ -65,7 +65,11 @@ func (server *MediaMTXServer) startRPC() error {
 				writeError(writer, http.StatusServiceUnavailable, "media edge is closing")
 				return
 			}
-			ref, observed := source.cameraControl().boundReference()
+			if source.config.Kind == SourceKindPipeline {
+				writeError(writer, http.StatusNotFound, "media source is a media edge pipeline and has no service reference")
+				return
+			}
+			ref, observed := source.controller().boundReference()
 			if !observed {
 				writeError(writer, http.StatusServiceUnavailable, "media source reference has not been discovered")
 				return
@@ -84,6 +88,9 @@ func (server *MediaMTXServer) startRPC() error {
 				status := http.StatusServiceUnavailable
 				if errors.Is(err, ErrMediaCapacity) {
 					status = http.StatusTooManyRequests
+				}
+				if errors.Is(err, ErrCaptureUnsupported) {
+					status = http.StatusNotImplemented
 				}
 				if server.source(parts[3]) == nil {
 					status = http.StatusNotFound

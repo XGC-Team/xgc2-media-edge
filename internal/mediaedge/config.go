@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/XGC-Team/xgc2-xrpc/go"
+	"math"
 	"net"
 	"net/url"
 	"path/filepath"
@@ -61,6 +62,12 @@ type Config struct {
 	MaxCaptureBytes          int64
 	MaxRetainedSnapshotBytes int64
 	RuntimePolicy            *xrpc.Policy
+	// PipelineTemplatesDir holds the pipeline templates and PipelineRuntimeDir
+	// the per-source scratch directories of pipeline sources. Both are
+	// required, as canonical absolute paths, when a pipeline source is
+	// configured and are ignored otherwise.
+	PipelineTemplatesDir string
+	PipelineRuntimeDir   string
 }
 
 // ICEServerConfig is the product-facing STUN/TURN contract. The media kernel
@@ -86,21 +93,37 @@ type RecordingConfig struct {
 	CapacitySafetyFactor    float64
 }
 
+const (
+	// SourceKindCameraSource is a source process that implements the
+	// camera-source XRPC contract on its own Unix socket (a Gazebo camera
+	// plugin, the camera driver node). It is the default kind.
+	SourceKindCameraSource = "camera-source"
+	// SourceKindPipeline is an encoder pipeline that media-edge itself starts
+	// on demand from a template and stops when the last consumer leaves.
+	SourceKindPipeline = "pipeline"
+)
+
 // SourceConfig describes one locally produced, H264/RTP source. The capture
-// source must send RTP only to RTPListenAddress and expose its describe,
-// lifecycle, and snapshot endpoint through ControlSocket; neither is externally
-// reachable. The four media metadata fields are optional expected values: all
-// four must be omitted or all four must match the authoritative describe reply.
+// source must send RTP only to RTPListenAddress. A camera-source exposes its
+// describe, lifecycle, and snapshot endpoint through ControlSocket; a pipeline
+// source is run by this process from Pipeline and has no control socket.
+// Neither is externally reachable. For a camera-source the four media metadata
+// fields are optional expected values: all four must be omitted or all four
+// must match the authoritative describe reply. A pipeline source has no
+// descriptor to ask, so all four are required and authoritative.
 type SourceConfig struct {
-	ID                       string  `json:"id"`
-	RTPListenAddress         string  `json:"rtpListenAddress"`
-	ControlSocket            string  `json:"controlSocket"`
-	ControlInstanceID        string  `json:"controlInstanceId,omitempty"`
-	Width                    int     `json:"width,omitempty"`
-	Height                   int     `json:"height,omitempty"`
-	FPS                      float64 `json:"fps,omitempty"`
-	FrameID                  string  `json:"frameId,omitempty"`
-	KeyframeRequestSupported bool    `json:"-"`
+	ID                       string          `json:"id"`
+	Kind                     string          `json:"kind,omitempty"`
+	RTPListenAddress         string          `json:"rtpListenAddress"`
+	ControlSocket            string          `json:"controlSocket,omitempty"`
+	ControlInstanceID        string          `json:"controlInstanceId,omitempty"`
+	Width                    int             `json:"width,omitempty"`
+	Height                   int             `json:"height,omitempty"`
+	FPS                      float64         `json:"fps,omitempty"`
+	FrameID                  string          `json:"frameId,omitempty"`
+	Pipeline                 *PipelineConfig `json:"pipeline,omitempty"`
+	KeyframeRequestSupported bool            `json:"-"`
+	CaptureSupported         bool            `json:"-"`
 }
 
 func (config Config) normalized() (Config, error) {
@@ -152,6 +175,7 @@ func (config Config) normalized() (Config, error) {
 		return Config{}, err
 	}
 	config.Recording = recording
+	config.Sources = append([]SourceConfig(nil), config.Sources...)
 	seen := make(map[string]struct{}, len(config.Sources))
 	seenSockets := make(map[string]struct{}, len(config.Sources))
 	seenRTP := make(map[string]struct{}, len(config.Sources))
@@ -160,17 +184,25 @@ func (config Config) normalized() (Config, error) {
 		if err != nil {
 			return Config{}, err
 		}
+		if source.Kind == SourceKindPipeline {
+			source, err = config.resolvePipeline(source)
+			if err != nil {
+				return Config{}, err
+			}
+		}
 		if _, duplicate := seen[source.ID]; duplicate {
 			return Config{}, fmt.Errorf("media source %q is duplicated", source.ID)
 		}
 		seen[source.ID] = struct{}{}
-		if _, duplicate := seenSockets[source.ControlSocket]; duplicate {
-			return Config{}, errors.New("media sources must not share a control socket")
+		if source.ControlSocket != "" {
+			if _, duplicate := seenSockets[source.ControlSocket]; duplicate {
+				return Config{}, errors.New("media sources must not share a control socket")
+			}
+			seenSockets[source.ControlSocket] = struct{}{}
 		}
 		if _, duplicate := seenRTP[source.RTPListenAddress]; duplicate {
 			return Config{}, errors.New("media sources must not share an RTP listener")
 		}
-		seenSockets[source.ControlSocket] = struct{}{}
 		seenRTP[source.RTPListenAddress] = struct{}{}
 		config.Sources[index] = source
 	}
@@ -255,19 +287,54 @@ func (config RecordingConfig) normalized() (RecordingConfig, error) {
 
 func (config SourceConfig) normalized() (SourceConfig, error) {
 	config.ID = strings.TrimSpace(config.ID)
+	config.Kind = strings.TrimSpace(config.Kind)
 	config.RTPListenAddress = strings.TrimSpace(config.RTPListenAddress)
 	config.ControlSocket = strings.TrimSpace(config.ControlSocket)
 	config.FrameID = strings.TrimSpace(config.FrameID)
 	if !stableSourceID.MatchString(config.ID) {
 		return SourceConfig{}, errors.New("media source ID must be a stable identifier")
 	}
+	if config.Kind == "" {
+		config.Kind = SourceKindCameraSource
+	}
 	if err := requireLoopbackUDP(config.RTPListenAddress); err != nil {
 		return SourceConfig{}, fmt.Errorf("media source %q RTP listener: %w", config.ID, err)
 	}
-	if !filepath.IsAbs(config.ControlSocket) || filepath.Clean(config.ControlSocket) != config.ControlSocket || len(config.ControlSocket) >= 108 || strings.ContainsAny(config.ControlSocket, "\x00\r\n") {
-		return SourceConfig{}, fmt.Errorf("media source %q control socket must be an absolute Unix path", config.ID)
+	switch config.Kind {
+	case SourceKindCameraSource:
+		if config.Pipeline != nil {
+			return SourceConfig{}, fmt.Errorf("media source %q: pipeline settings require kind %q", config.ID, SourceKindPipeline)
+		}
+		if !filepath.IsAbs(config.ControlSocket) || filepath.Clean(config.ControlSocket) != config.ControlSocket || len(config.ControlSocket) >= 108 || strings.ContainsAny(config.ControlSocket, "\x00\r\n") {
+			return SourceConfig{}, fmt.Errorf("media source %q control socket must be an absolute Unix path", config.ID)
+		}
+	case SourceKindPipeline:
+		if config.ControlSocket != "" || config.ControlInstanceID != "" {
+			return SourceConfig{}, fmt.Errorf("media source %q: a pipeline source has no control socket", config.ID)
+		}
+		if config.Pipeline == nil {
+			return SourceConfig{}, fmt.Errorf("media source %q: kind %q requires pipeline settings", config.ID, SourceKindPipeline)
+		}
+		host, _, _ := net.SplitHostPort(config.RTPListenAddress)
+		if net.ParseIP(host) == nil {
+			return SourceConfig{}, fmt.Errorf("media source %q: a pipeline source needs a loopback IP address, not %q, as its RTP listener host", config.ID, host)
+		}
+		if config.Width < 16 || config.Height < 16 || config.FPS < 1 || config.FPS > 240 ||
+			math.Trunc(config.FPS) != config.FPS || config.FrameID == "" || len(config.FrameID) > 256 {
+			return SourceConfig{}, fmt.Errorf(
+				"media source %q: a pipeline source requires width and height of at least 16, an integral fps from 1 to 240 and a frame ID",
+				config.ID,
+			)
+		}
+		pipeline, err := config.Pipeline.normalized()
+		if err != nil {
+			return SourceConfig{}, fmt.Errorf("media source %q: %w", config.ID, err)
+		}
+		config.Pipeline = &pipeline
+	default:
+		return SourceConfig{}, fmt.Errorf("media source %q kind must be %q or %q", config.ID, SourceKindCameraSource, SourceKindPipeline)
 	}
-	if config.hasExpectedMetadata() {
+	if config.Kind == SourceKindCameraSource && config.hasExpectedMetadata() {
 		if config.Width < 16 || config.Height < 16 {
 			return SourceConfig{}, fmt.Errorf(
 				"media source %q expected width, height, FPS, and frame ID must all be provided; dimensions must be at least 16x16",

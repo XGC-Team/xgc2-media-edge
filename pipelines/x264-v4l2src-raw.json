@@ -1,0 +1,41 @@
+{
+  "name": "x264-v4l2src-raw",
+  "description": "H.264 RTP stream from a raw video device with software x264, plus a one frame per second JPEG snapshot branch.",
+  "input": "device",
+  "snapshot": true,
+  "parameters": {
+    "device": {
+      "description": "V4L2 device node",
+      "pattern": "/dev/[A-Za-z0-9_./-]{1,200}"
+    },
+    "format": {
+      "description": "Raw pixel format the device delivers, by GStreamer name (for example NV12, YUY2, UYVY)",
+      "default": "NV12",
+      "pattern": "[A-Za-z0-9]{2,16}"
+    },
+    "bitrateKbps": {
+      "description": "Target bitrate in kbit/s",
+      "default": "2500",
+      "pattern": "[0-9]{1,6}"
+    }
+  },
+  "command": [
+    "gst-launch-1.0", "-q", "v4l2src", "device=${device}", "do-timestamp=true", "!",
+    "video/x-raw,format=${format},width=${width},height=${height},framerate=${fps}/1", "!",
+    "videoconvert", "!",
+    "tee", "name=split",
+    "split.", "!",
+    "queue", "max-size-buffers=2", "leaky=downstream", "!",
+    "x264enc", "tune=zerolatency", "speed-preset=ultrafast", "key-int-max=${fps}", "bitrate=${bitrateKbps}", "byte-stream=true", "!",
+    "video/x-h264,profile=baseline", "!",
+    "h264parse", "config-interval=1", "!",
+    "rtph264pay", "pt=${payloadType}", "config-interval=1", "mtu=1200", "!",
+    "udpsink", "host=${rtpHost}", "port=${rtpPort}", "sync=false", "async=false",
+    "split.", "!",
+    "queue", "max-size-buffers=1", "leaky=downstream", "!",
+    "videorate", "drop-only=true", "!",
+    "video/x-raw,framerate=1/1", "!",
+    "jpegenc", "quality=90", "!",
+    "multifilesink", "location=${snapshotDir}/snapshot-%05d.jpg", "max-files=2", "post-messages=false"
+  ]
+}

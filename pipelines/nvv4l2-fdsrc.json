@@ -1,0 +1,38 @@
+{
+  "name": "nvv4l2-fdsrc",
+  "description": "H.264 RTP stream from raw frames that a producer writes to standard input with the Jetson hardware encoder nvv4l2h264enc, plus a one frame per second JPEG snapshot branch.",
+  "input": "stdin",
+  "snapshot": true,
+  "parameters": {
+    "format": {
+      "description": "Pixel format of the frames the producer writes, by rawvideoparse name: rgb, bgr or gray8",
+      "default": "bgr",
+      "pattern": "rgb|bgr|gray8"
+    },
+    "bitrate": {
+      "description": "Target bitrate in bit/s",
+      "default": "2500000",
+      "pattern": "[0-9]{4,9}"
+    }
+  },
+  "command": [
+    "gst-launch-1.0", "-q", "fdsrc", "fd=0", "blocksize=262144", "!",
+    "rawvideoparse", "format=${format}", "width=${width}", "height=${height}", "framerate=${fps}/1", "!",
+    "videoconvert", "!",
+    "tee", "name=split",
+    "split.", "!",
+    "queue", "max-size-buffers=2", "leaky=downstream", "!",
+    "nvvidconv", "!",
+    "video/x-raw(memory:NVMM),format=NV12", "!",
+    "nvv4l2h264enc", "bitrate=${bitrate}", "iframeinterval=${fps}", "idrinterval=${fps}", "!",
+    "h264parse", "config-interval=1", "!",
+    "rtph264pay", "pt=${payloadType}", "config-interval=1", "mtu=1200", "!",
+    "udpsink", "host=${rtpHost}", "port=${rtpPort}", "sync=false", "async=false",
+    "split.", "!",
+    "queue", "max-size-buffers=1", "leaky=downstream", "!",
+    "videorate", "drop-only=true", "!",
+    "video/x-raw,framerate=1/1", "!",
+    "jpegenc", "quality=90", "!",
+    "multifilesink", "location=${snapshotDir}/snapshot-%05d.jpg", "max-files=2", "post-messages=false"
+  ]
+}

@@ -117,7 +117,7 @@ func TestRealPythonSourceControlAndEdgeCapture(t *testing.T) {
 		if !restarted && err != nil {
 			t.Errorf("edge close: %v", err)
 		}
-		edge.sources["python-camera"].cameraControl().close()
+		edge.sources["python-camera"].controller().close()
 	}()
 	// Discover the real edge host, then bind its fresh process incarnation.
 	target := config.TargetID
@@ -144,7 +144,7 @@ func TestRealPythonSourceControlAndEdgeCapture(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	control := edge.sources["python-camera"].cameraControl()
+	control := edge.sources["python-camera"].controller()
 	data, status, _, err = client.Do(ctx, http.MethodGet, "/v1/media/sources/python-camera/ref", "fixture:source-ref", "", nil)
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("bound source reference HTTP %d err=%v data=%s", status, err, data)

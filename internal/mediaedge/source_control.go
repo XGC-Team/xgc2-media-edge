@@ -33,11 +33,18 @@ const (
 	sourceCodec                  = "H264"
 )
 
+// A camera-source must offer all of these. A pipeline source offers capture
+// and fresh-snapshot only when its template has a snapshot branch.
 var requiredSourceCapabilities = [...]string{
 	"start",
 	"stop",
 	"capture",
 	"fresh-snapshot",
+}
+
+var pipelineRequiredCapabilities = [...]string{
+	"start",
+	"stop",
 }
 
 type sourceControlRequest struct {
@@ -121,7 +128,7 @@ func describeSource(ctx context.Context, config SourceConfig) (SourceConfig, err
 	defer control.close()
 	return describeSourceWith(ctx, config, control)
 }
-func describeSourceWith(ctx context.Context, config SourceConfig, control *cameraControl) (SourceConfig, error) {
+func describeSourceWith(ctx context.Context, config SourceConfig, control sourceController) (SourceConfig, error) {
 	response, _, _, err := control.call(ctx, sourceControlRequest{
 		Operation: "describe",
 	})
@@ -171,13 +178,22 @@ func describeSourceWith(ctx context.Context, config SourceConfig, control *camer
 	for _, capability := range response.Capabilities {
 		capabilities[capability] = struct{}{}
 	}
-	for _, required := range requiredSourceCapabilities {
-		if _, found := capabilities[required]; !found {
+	required := requiredSourceCapabilities[:]
+	if config.Kind == SourceKindPipeline {
+		required = pipelineRequiredCapabilities[:]
+	}
+	for _, capability := range required {
+		if _, found := capabilities[capability]; !found {
 			return SourceConfig{}, fmt.Errorf(
 				"capture source does not advertise required capability %q",
-				required,
+				capability,
 			)
 		}
+	}
+	_, advertisesCapture := capabilities["capture"]
+	_, advertisesFreshSnapshot := capabilities["fresh-snapshot"]
+	if advertisesCapture != advertisesFreshSnapshot {
+		return SourceConfig{}, errors.New("capture source advertises capture without fresh-snapshot, or the reverse")
 	}
 	_, advertisesKeyframe := capabilities["request-keyframe"]
 	if advertisesKeyframe != response.KeyframeRequestSupported || response.KeyframePolicy == "" {
@@ -205,6 +221,7 @@ func describeSourceWith(ctx context.Context, config SourceConfig, control *camer
 	config.FPS = response.FPS
 	config.FrameID = response.FrameID
 	config.KeyframeRequestSupported = response.KeyframeRequestSupported
+	config.CaptureSupported = advertisesCapture
 	return config, nil
 }
 
