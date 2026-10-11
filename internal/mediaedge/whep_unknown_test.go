@@ -63,6 +63,8 @@ func uncertainWHEPServer(t *testing.T, control *uncertainWHEPControl) *MediaMTXS
 	t.Helper()
 	server := newMediaMTXServer(Config{MaxSessions: 1, SessionGracePeriod: time.Hour, Sources: []SourceConfig{{ID: "camera"}}}, MediaMTXSettings{}, control, newFakeMediaMTXProcess())
 	server.sources["camera"].active = true
+	source := server.sources["camera"]
+	source.controlOnce.Do(func() { source.controlRPC = &cameraControl{sourceID: "camera"} })
 	t.Cleanup(func() {
 		server.mu.Lock()
 		server.closing = true
@@ -202,6 +204,7 @@ func TestWHEPUnobservedCreationReleasesOnlyAfterManagedChildExit(t *testing.T) {
 	server := uncertainWHEPServer(t, control)
 	source := server.sources["camera"]
 	source.config.ControlSocket, source.config.ControlInstanceID = probe.socket, "test-instance"
+	source.controlRPC.(*cameraControl).socket = probe.socket
 	if _, err := server.OpenSession(t.Context(), "camera", SessionOffer{SDP: "offer"}); err == nil {
 		t.Fatal("lost receipt reported success")
 	}

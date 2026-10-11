@@ -71,4 +71,6 @@ type SourceStatus struct {
 	NativeState           string    `json:"nativeState,omitempty"`
 	NativeAppliedActive   bool      `json:"nativeAppliedActive"`
 	ConfigurationRevision uint64    `json:"configurationRevision"`
+	DesiredLeaseRevision  uint64    `json:"desiredLeaseRevision"`
+	AppliedLeaseRevision  uint64    `json:"appliedLeaseRevision"`
 }

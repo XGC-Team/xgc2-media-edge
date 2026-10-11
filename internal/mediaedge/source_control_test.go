@@ -33,7 +33,7 @@ func TestDescribeSourceRejectsMissingFreshSnapshotCapability(t *testing.T) {
 	}
 }
 
-func TestBoundSourceReferenceRequiresDiscoveryAndPreservesItsIncarnation(t *testing.T) {
+func TestBoundSourceReferenceRequiresDiscoveryAndUsesObservedIncarnation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	source := newCaptureControl(t)
@@ -57,11 +57,11 @@ func TestBoundSourceReferenceRequiresDiscoveryAndPreservesItsIncarnation(t *test
 	}
 	wrong := &cameraControl{socket: source.socket, instance: "other-owner", sourceID: "camera"}
 	defer wrong.close()
-	if _, err := wrong.transport(ctx); err == nil || !strings.Contains(err.Error(), "configured incarnation") {
-		t.Fatalf("configured incarnation did not fence discovery: %v", err)
+	if _, err := wrong.transport(ctx); err != nil {
+		t.Fatalf("discovery did not replace the bootstrap incarnation: %v", err)
 	}
-	if _, observed := wrong.boundReference(); observed {
-		t.Fatal("rejected discovery was exposed as a bound source reference")
+	if ref, observed := wrong.boundReference(); !observed || ref.InstanceID != "test-instance" {
+		t.Fatal("discovery retained a stale bootstrap incarnation")
 	}
 }
 

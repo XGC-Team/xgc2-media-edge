@@ -169,6 +169,7 @@ func (server *MediaMTXServer) StartRecording(
 		}
 	}()
 	now := time.Now().UTC()
+	metadata := source.sourceConfig()
 	item := &mediaMTXRecording{
 		server: server, source: source, root: server.config.Recording.Root, path: recordingDirectory,
 		done: make(chan struct{}),
@@ -176,8 +177,8 @@ func (server *MediaMTXServer) StartRecording(
 			SchemaVersion: recordingManifestSchema, RecordingID: recordingID, SourceID: source.config.ID,
 			State: RecordingWaiting, CreatedAt: now, RequestedDurationSeconds: request.DurationSeconds,
 			Codec: RecordingCodec{
-				Name: sourceCodec, Container: "fmp4", Width: source.config.Width, Height: source.config.Height,
-				FPS: source.config.FPS, RTPPayloadType: sourceRTPPayloadType, RTPClockRate: h264RTPClockRate,
+				Name: sourceCodec, Container: "fmp4", Width: metadata.Width, Height: metadata.Height,
+				FPS: metadata.FPS, RTPPayloadType: sourceRTPPayloadType, RTPClockRate: h264RTPClockRate,
 				SDPFmtpLine: h264FMTP, StreamCopy: true,
 				MaxBitrateBitsSec: server.config.Recording.MaxBitrateBitsPerSecond,
 			},

@@ -8,6 +8,7 @@ import (
 	"github.com/XGC-Team/xgc2-xrpc/go/httpx"
 	"io"
 	"math"
+	"math/rand"
 	"net"
 	"net/url"
 	"path/filepath"
@@ -96,6 +97,9 @@ type MediaMTXServer struct {
 	httpServer       *httpServer
 	stopOnce         sync.Once
 	closed           chan struct{}
+	socketWatchOnce  sync.Once
+	socketWatcher    *sourceSocketWatcher
+	socketWatchError error
 }
 
 type mediaMTXSource struct {
@@ -125,6 +129,8 @@ type mediaMTXSource struct {
 
 	lastKeyframeRequestAt time.Time
 	lastRecoveryAttemptAt time.Time
+	recoveryBackoff       time.Duration
+	recoveryNext          time.Time
 	recoveryPending       bool
 	keyframePending       bool
 	capturePending        bool
@@ -311,8 +317,8 @@ func newMediaMTXServer(
 	return server
 }
 
-// Start validates every adapter contract before MediaMTX binds ICE. This keeps
-// a typo or mismatched source from creating a superficially healthy endpoint.
+// Start binds media-edge's own resources. External sources are discovered only
+// when first needed and never gate this process's readiness.
 func (server *MediaMTXServer) Start() (startErr error) {
 	if server == nil || server.control == nil || server.process == nil {
 		return errors.New("MediaMTX server is not configured")
@@ -362,6 +368,10 @@ func (server *MediaMTXServer) Start() (startErr error) {
 	sort.Strings(sourceIDs)
 	for _, sourceID := range sourceIDs {
 		source := server.sources[sourceID]
+		if source.config.Kind != SourceKindPipeline {
+			source.controlError = "camera source has not been requested"
+			continue
+		}
 		described, err := describeSourceWith(server.lifecycleContext, source.config, source.controller())
 		if err != nil {
 			return fmt.Errorf("validate media source %q: %w", source.config.ID, err)
@@ -419,6 +429,11 @@ func (server *MediaMTXServer) HTTPConfig() Config {
 	config := server.config
 	config.AllowedOrigins = append([]string(nil), config.AllowedOrigins...)
 	config.Sources = append([]SourceConfig(nil), config.Sources...)
+	for index, configured := range config.Sources {
+		if source := server.sources[configured.ID]; source != nil {
+			config.Sources[index] = source.sourceConfig()
+		}
+	}
 	return config
 }
 
@@ -575,10 +590,11 @@ func (server *MediaMTXServer) OpenSession(
 	// A short GOP already guarantees bounded startup. This request accelerates
 	// first paint; reconcile sends one more after ICE is actually established.
 	source.requestKeyframeAsync(true)
+	metadata := source.sourceConfig()
 	return SessionAnswer{
 		SessionID: sessionID, SDP: upstream.AnswerSDP, DataChannelLabel: ControlDataChannelLabel,
-		Source: sourceDescription{ID: source.config.ID, Width: source.config.Width, Height: source.config.Height,
-			FPS: source.config.FPS, FrameID: source.config.FrameID, Codec: sourceCodec},
+		Source: sourceDescription{ID: metadata.ID, Width: metadata.Width, Height: metadata.Height,
+			FPS: metadata.FPS, FrameID: metadata.FrameID, Codec: sourceCodec},
 	}, nil
 }
 
@@ -713,8 +729,10 @@ func (source *mediaMTXSource) acquire(ctx context.Context) error {
 	source.pending++
 	source.cancelDeactivateTimerLocked()
 	if source.active && !source.deactivateUncertain {
-		source.mu.Unlock()
-		return nil
+		if _, managed := source.controller().(*cameraPeer); !managed {
+			source.mu.Unlock()
+			return nil
+		}
 	}
 	source.mu.Unlock()
 	if _, _, _, err := source.controller().call(ctx, sourceControlRequest{
@@ -823,6 +841,13 @@ func (source *mediaMTXSource) deactivateIfUnused(epoch uint64) {
 	source.mu.Lock()
 	defer source.mu.Unlock()
 	if err != nil {
+		if _, managed := source.controller().(*cameraPeer); managed {
+			// The reconnect worker owns the revisioned stop, including replay
+			// to a replacement instance. Do not create a second retry owner.
+			source.active = false
+			source.deactivateUncertain = true
+			return
+		}
 		// A lost reply does not prove whether the adapter stopped. Keep the
 		// lease active, retry stop, and make a new acquire confirm activation.
 		source.deactivateUncertain = true
@@ -840,12 +865,9 @@ func (source *mediaMTXSource) deactivateIfUnused(epoch uint64) {
 }
 
 func (source *mediaMTXSource) requestKeyframeAsync(force bool) {
-	if !source.config.KeyframeRequestSupported {
-		return
-	}
 	now := time.Now()
 	source.mu.Lock()
-	if !source.active || source.keyframePending || (!force && !source.lastKeyframeRequestAt.IsZero() &&
+	if !source.config.KeyframeRequestSupported || !source.active || source.keyframePending || (!force && !source.lastKeyframeRequestAt.IsZero() &&
 		now.Sub(source.lastKeyframeRequestAt) < keyframeRequestMinimumInterval) {
 		source.mu.Unlock()
 		return
@@ -882,7 +904,9 @@ func (server *MediaMTXServer) reconcileLoop() {
 
 func (server *MediaMTXServer) reconcile() {
 	for _, source := range server.sources {
-		source.pollStatusAsync()
+		if source.config.Kind == SourceKindPipeline {
+			source.pollStatusAsync()
+		}
 	}
 	ctx, cancel := context.WithTimeout(server.lifecycleContext, mediaMTXPathRequestTimeout)
 	paths, pathErr := server.control.Paths(ctx)
@@ -995,22 +1019,29 @@ func (source *mediaMTXSource) observePath(now time.Time, status mtx.PathStatus) 
 	bytesChanged := status.InboundBytes != source.inboundBytes
 	if bytesChanged {
 		source.lastPacketAt = now
+		source.recoveryBackoff = 250 * time.Millisecond
+		source.recoveryNext = time.Time{}
 	}
 	source.inboundBytes = status.InboundBytes
 	source.framesInError = status.InboundFramesInError
-	source.available = status.Available
-	source.online = status.Online
+	source.available = status.Available && (source.config.Kind == SourceKindPipeline || source.controlHealthy)
+	source.online = status.Online && (source.config.Kind == SourceKindPipeline || source.controlHealthy)
 	recordingID := source.recordingID
 	lastActivity := source.lastPacketAt
 	if lastActivity.Before(source.activeSince) {
 		lastActivity = source.activeSince
 	}
-	recover := !source.recoveryPending && source.active && source.consumerCountLocked() > 0 && !lastActivity.IsZero() &&
+	recover := source.config.Kind == SourceKindPipeline && !source.recoveryPending && source.active && source.consumerCountLocked() > 0 && !lastActivity.IsZero() &&
 		now.Sub(lastActivity) >= sourceStallTimeout &&
-		(source.lastRecoveryAttemptAt.IsZero() || now.Sub(source.lastRecoveryAttemptAt) >= sourceRecoveryMinimumInterval)
+		!now.Before(source.recoveryNext)
 	recoveryEpoch := source.deactivateEpoch
 	if recover {
 		source.lastRecoveryAttemptAt = now
+		if source.recoveryBackoff == 0 {
+			source.recoveryBackoff = 250 * time.Millisecond
+		}
+		source.recoveryNext = now.Add(time.Duration(rand.Int63n(int64(source.recoveryBackoff))))
+		source.recoveryBackoff = min(30*time.Second, 2*source.recoveryBackoff)
 		source.recoveryPending = true
 	}
 	source.mu.Unlock()
@@ -1047,6 +1078,12 @@ func (source *mediaMTXSource) recover(epoch uint64) {
 	}
 	ctx, cancel := context.WithTimeout(source.server.lifecycleContext, sourceControlRequestTimeout)
 	defer cancel()
+	response, _, _, err := source.controller().call(ctx, sourceControlRequest{Operation: "status"})
+	// A producer waiting for a late ROS topic remains active. Absence of RTP
+	// is not permission to restart it or repeatedly send the owned start.
+	if err == nil && response.AppliedActive {
+		return
+	}
 	if _, _, _, err := source.controller().call(ctx, sourceControlRequest{
 		Operation: "start",
 	}); err == nil {
@@ -1063,6 +1100,15 @@ func (server *MediaMTXServer) SourceStatuses() []SourceStatus {
 	server.mu.RUnlock()
 	statuses := make([]SourceStatus, 0, len(sources))
 	for _, source := range sources {
+		var desiredRevision, appliedRevision uint64
+		if peer, ok := source.controller().(*cameraPeer); ok {
+			peer.mu.Lock()
+			desiredRevision = peer.desiredRevision
+			if peer.connected && peer.appliedInstance == peer.control.boundInstance() {
+				appliedRevision = peer.appliedRevision
+			}
+			peer.mu.Unlock()
+		}
 		source.mu.Lock()
 		statuses = append(statuses, SourceStatus{
 			ID: source.config.ID, Kind: source.config.Kind, Active: source.active, Available: source.available, Online: source.online,
@@ -1074,6 +1120,7 @@ func (server *MediaMTXServer) SourceStatuses() []SourceStatus {
 			ControlError: source.controlError, ControlObservedAt: source.controlObservedAt,
 			ControlInstanceID: source.controller().boundInstance(), NativeState: source.nativeStatus.State,
 			NativeAppliedActive: source.nativeStatus.AppliedActive, ConfigurationRevision: source.nativeStatus.ConfigurationRevision,
+			DesiredLeaseRevision: desiredRevision, AppliedLeaseRevision: appliedRevision,
 		})
 		source.mu.Unlock()
 	}
@@ -1135,7 +1182,7 @@ func (server *MediaMTXServer) CaptureSnapshot(
 	if source == nil {
 		return Snapshot{}, fmt.Errorf("media source %q was not found", sourceID)
 	}
-	if !source.config.CaptureSupported {
+	if source.config.Kind == SourceKindPipeline && !source.sourceConfig().CaptureSupported {
 		return Snapshot{}, ErrCaptureUnsupported
 	}
 	source.mu.Lock()
@@ -1150,6 +1197,7 @@ func (server *MediaMTXServer) CaptureSnapshot(
 		return Snapshot{}, fmt.Errorf("activate media source %q: %w", sourceID, err)
 	}
 	defer source.releasePending("")
+	metadata := source.sourceConfig()
 	id, err := newSnapshotID()
 	if err != nil {
 		return Snapshot{}, err
@@ -1164,8 +1212,8 @@ func (server *MediaMTXServer) CaptureSnapshot(
 	if response.SourceID != source.config.ID || response.SnapshotID != id || response.Sequence == 0 {
 		return Snapshot{}, errors.New("capture source returned a mismatched snapshot ID")
 	}
-	if response.Width != source.config.Width || response.Height != source.config.Height ||
-		response.PixelFormat != "rgb8" || response.FrameID != source.config.FrameID {
+	if response.Width != metadata.Width || response.Height != metadata.Height ||
+		response.PixelFormat != "rgb8" || response.FrameID != metadata.FrameID {
 		return Snapshot{}, errors.New("capture source snapshot metadata does not match the media source")
 	}
 	if request.includeRGB() {
@@ -1506,7 +1554,7 @@ func (source *mediaMTXSource) controller() sourceController {
 			return
 		}
 		config := source.server.config
-		source.controlRPC = &cameraControl{
+		control := &cameraControl{
 			socket: source.config.ControlSocket, instance: source.config.ControlInstanceID,
 			sourceID: source.config.ID, maxCaptureBytes: config.MaxCaptureBytes,
 			clientConfig: httpx.Config{
@@ -1516,6 +1564,7 @@ func (source *mediaMTXSource) controller() sourceController {
 				HeaderTimeout: config.HeaderTimeout, IdleTimeout: config.IdleTimeout,
 			},
 		}
+		source.controlRPC = newCameraPeer(source, control)
 	})
 	return source.controlRPC
 }

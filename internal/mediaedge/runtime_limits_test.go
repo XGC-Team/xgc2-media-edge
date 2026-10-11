@@ -42,7 +42,7 @@ func TestRuntimeLimitsExecuteHostAndClientSettings(t *testing.T) {
 	if server.config.MaxOperations != 2 || server.config.MaxCaptureBytes != 4096 {
 		t.Fatal("product domain admission ignored transport ceiling")
 	}
-	rpc := server.sources["camera"].controller().(*cameraControl)
+	rpc := server.sources["camera"].controller().(*cameraPeer).control
 	defer rpc.close()
 	client, err := rpc.transport(t.Context())
 	if err == nil || client != nil {

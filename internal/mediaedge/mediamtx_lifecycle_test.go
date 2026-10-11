@@ -18,11 +18,12 @@ import (
 // The probe uses actual Unix transactions. Dropping a reply models an
 // ambiguous acknowledgment: the adapter may already have applied the command.
 type lifecycleControlProbe struct {
-	socket     string
-	starts     atomic.Int32
-	stops      atomic.Int32
-	failStarts atomic.Int32
-	failStops  atomic.Int32
+	socket       string
+	starts       atomic.Int32
+	stops        atomic.Int32
+	failStarts   atomic.Int32
+	failStops    atomic.Int32
+	statusActive atomic.Bool
 }
 
 func newLifecycleControlProbe(t *testing.T) *lifecycleControlProbe {
@@ -66,10 +67,10 @@ func newLifecycleControlProbe(t *testing.T) *lifecycleControlProbe {
 			}
 		}
 		state := "idle"
-		if operation == "start" {
+		if operation == "start" || (operation == "status" && probe.statusActive.Load()) {
 			state = "active"
 		}
-		json.NewEncoder(writer).Encode(sourceControlResponse{OK: true, ManagedSourceID: "camera", Active: operation == "start", Completion: "applied", State: state, ConfigurationRevision: 1})
+		json.NewEncoder(writer).Encode(sourceControlResponse{OK: true, ManagedSourceID: "camera", Active: operation == "start", AppliedActive: state == "active", Completion: "applied", State: state, ConfigurationRevision: 1})
 	})}
 	go server.Serve(listener)
 	t.Cleanup(func() { server.Close() })
@@ -88,6 +89,12 @@ func newLifecycleSource(t *testing.T, probe *lifecycleControlProbe) *mediaMTXSou
 		sessions: make(map[string]struct{}), active: true,
 		activeSince: time.Now().Add(-10 * sourceStallTimeout),
 	}
+	// These tests exercise native lifecycle receipts and stale recovery tasks;
+	// lazy discovery and replacement leases have separate camera-peer tests.
+	source.controlOnce.Do(func() {
+		source.controlRPC = &cameraControl{socket: probe.socket, sourceID: "camera"}
+	})
+	source.config.Kind = SourceKindPipeline
 	t.Cleanup(func() {
 		server.mu.Lock()
 		server.closing = true
@@ -98,6 +105,8 @@ func newLifecycleSource(t *testing.T, probe *lifecycleControlProbe) *mediaMTXSou
 		source.cancelDeactivateTimerLocked()
 		source.mu.Unlock()
 		source.lifecycleMu.Unlock()
+		server.background.Wait()
+		source.controller().close()
 	})
 	return source
 }
@@ -228,6 +237,22 @@ func TestMediaMTXRecoveryRequiresCurrentDemand(t *testing.T) {
 				t.Fatal("completed recovery retained single-flight ownership")
 			}
 		})
+	}
+}
+
+func TestMediaMTXWaitingPipelineDoesNotReplayStartForMissingRTP(t *testing.T) {
+	probe := newLifecycleControlProbe(t)
+	probe.statusActive.Store(true)
+	source := newLifecycleSource(t, probe)
+	source.sessions["viewer"] = struct{}{}
+	// The ROS producer stays alive while its topic is absent. Repeated RTP
+	// stall observations must not restart it or resend its applied lease.
+	for range 5 {
+		source.recoveryPending = true
+		source.recover(source.deactivateEpoch)
+	}
+	if probe.starts.Load() != 0 || probe.stops.Load() != 0 {
+		t.Fatal("missing topic restarted an already active pipeline")
 	}
 }
 

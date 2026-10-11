@@ -35,6 +35,11 @@ function App() {
   const peerRef = useRef<RTCPeerConnection | null>(null)
   const sessionIdRef = useRef('')
   const generationRef = useRef(0)
+  const retryRef = useRef<number | null>(null)
+  const backoffRef = useRef(250)
+  const mountedRef = useRef(false)
+  const inFlightRef = useRef(false)
+  const connectRef = useRef<(() => Promise<void>) | null>(null)
   const [skin, setSkin] = useSkin(skinOptions)
   const [sessionState, setSessionState] = useState<SessionState>('starting')
   const [stateLabel, setStateLabel] = useState('Connecting')
@@ -42,6 +47,8 @@ function App() {
   const [connecting, setConnecting] = useState(true)
 
   const closeSession = useCallback(() => {
+    if (retryRef.current !== null) window.clearTimeout(retryRef.current)
+    retryRef.current = null
     generationRef.current += 1
     const peer = peerRef.current
     const sessionId = sessionIdRef.current
@@ -58,7 +65,22 @@ function App() {
     }
   }, [])
 
+  const scheduleRetry = useCallback(() => {
+    if (!mountedRef.current || retryRef.current !== null) return
+    const delay = Math.random() * backoffRef.current
+    backoffRef.current = Math.min(30_000, backoffRef.current * 2)
+    retryRef.current = window.setTimeout(() => {
+      retryRef.current = null
+      void connectRef.current?.()
+    }, delay)
+  }, [])
+
   const connect = useCallback(async () => {
+    if (inFlightRef.current) {
+      scheduleRetry()
+      return
+    }
+    inFlightRef.current = true
     closeSession()
     const currentGeneration = generationRef.current
     setConnecting(true)
@@ -90,6 +112,9 @@ function App() {
     connection.addEventListener('connectionstatechange', () => {
       if (currentGeneration !== generationRef.current) return
       if (connection.connectionState === 'connected') {
+        backoffRef.current = 250
+        if (retryRef.current !== null) window.clearTimeout(retryRef.current)
+        retryRef.current = null
         setConnecting(false)
         setSessionState('connected')
         setStateLabel('Connected')
@@ -98,7 +123,8 @@ function App() {
         setConnecting(false)
         setSessionState('error')
         setStateLabel('Connection lost')
-        setMessage('The direct WebRTC connection stopped. Reconnect to try again.')
+        setMessage('The direct WebRTC connection stopped. Reconnecting automatically…')
+        scheduleRetry()
       }
     })
 
@@ -113,6 +139,7 @@ function App() {
         credentials: 'omit',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sdp: connection.localDescription.sdp }),
+        signal: AbortSignal.timeout(15_000),
       })
       const answer = await response.json() as SessionAnswer
       if (!response.ok) throw new Error(answer.error || `session request failed (${response.status})`)
@@ -131,15 +158,21 @@ function App() {
       closeSession()
       setConnecting(false)
       setSessionState('error')
-      setStateLabel('Error')
+      setStateLabel('Unavailable')
       setMessage(cause instanceof Error ? cause.message : 'Unable to open the video session.')
+      scheduleRetry()
+    } finally {
+      inFlightRef.current = false
     }
-  }, [closeSession, sourceId])
+  }, [closeSession, scheduleRetry, sourceId])
 
   useEffect(() => {
+    mountedRef.current = true
+    connectRef.current = connect
     void connect()
     window.addEventListener('pagehide', closeSession)
     return () => {
+      mountedRef.current = false
       window.removeEventListener('pagehide', closeSession)
       closeSession()
     }

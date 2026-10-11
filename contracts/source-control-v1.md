@@ -52,7 +52,11 @@ Descriptor includes `ok`, `protocolVersion:1`, `sourceId`, `codec:"H264"`,
 `height`, `fps`, `frameId`, `capabilities`, `keyframeRequestSupported`, and
 `keyframePolicy`. Required capabilities are `start`, `stop`, `capture`,
 `fresh-snapshot`. The configured loopback RTP destination and optional expected
-geometry must match the descriptor before media-edge starts a listener.
+geometry must match the descriptor before media-edge applies a lease. Source
+discovery is lazy and never gates the edge's own readiness. Socket replacement
+retires the old fenced transport; the desired lease is reconciled once on the
+new instance. Desired and confirmed applied lease revisions belong to the edge
+and are distinct from the source's configuration revisions.
 
 A source with bounded GOP and no real force-IDR operation reports
 `keyframeRequestSupported:false`, `keyframePolicy:"bounded-gop"`, omits the

@@ -139,9 +139,22 @@ The implemented shared contract is [source-control-v1](contracts/source-control-
 Each source owns one XRPC `http.v1` Unix socket beneath an owned 0700 runtime
 directory, with a fresh process incarnation and socket mode 0600. Edge discovers
 GET `/v1/describe`, binds its returned `service_ref`, and validates GET
-`/v1/media/sources/{sourceId}/describe` before opening the media listener.
+`/v1/media/sources/{sourceId}/describe` when a viewer, capture, or source-reference
+request first needs that peer. A missing source never blocks startup or edge
+readiness. Describe facts and health report each source's control state.
 XRPC matches discovery by path only, so GET `/v1/describe?wait_ready_ms=N`
 remains an unbound discovery request.
+
+One shared inotify watcher observes socket removal and recreation, including
+late runtime directories. Each requested peer has one reconnect flight, using
+held readiness discovery and full jitter from 250 ms to a 30 s cap. Ready
+discovery returns immediately, so the connected worker waits for socket or
+call-failure events instead of continuously rearming it. Failed viewers and
+captures receive unavailable responses; the player retries with the same
+bounded backoff and recovers without a page reload. An owned lease has a
+monotonic desired revision and a confirmed applied revision for its peer
+instance. A replacement receives the latest start or stop once; a lost receipt
+is resolved from native status before another write to the same revision.
 
 The source descriptor is authoritative for loopback H264/RTP payload 96 at
 90 kHz, fixed destination port, geometry, cadence, optical frame and capabilities.
@@ -162,10 +175,11 @@ source time.
 Local capture clients discover the edge's explicitly granted `--rpc-socket`
 and bind its returned incarnation. Instance-bound GET
 `/v1/media/sources/{sourceId}/ref` returns the source-owned ServiceRef observed
-during startup discovery. Calibration clients can bind that reference with the
+during lazy discovery. Calibration clients can bind that reference with the
 official SDK and call the source's typed configuration API directly, retaining
-its calibration and publication receipts. The reference keeps its original
-incarnation if the source restarts; SDK fencing detects that stale owner.
+its calibration and publication receipts. After a restart the endpoint returns
+the freshly discovered reference; unavailable peers return 503. Clients that
+retained an earlier reference remain fenced to that earlier instance.
 
 Capture clients use the same bound edge incarnation (service `media-edge`) and
 issue instance-bound POST `/v1/media/sources/{sourceId}/capture` with
@@ -515,8 +529,8 @@ symlink ancestors fail; startup has no temporary-directory fallback. Source
 adapter runtime grants are owned separately by their deployments.
 
 Unknown JSON fields, an empty source list, duplicate IDs, non-loopback RTP
-listeners, reused UDP ports, or a mismatch with a source's authoritative
-`describe` response fail startup. Every source keeps its own control socket,
+listeners, or reused UDP ports fail startup. A mismatch with a source's
+authoritative `describe` response fails that source's lease instead. Every source keeps its own control socket,
 viewer count, active state, RTP counters, snapshots, and recordings while
 sharing the Edge HTTP/WebRTC listener.
 
@@ -537,6 +551,19 @@ with the first source. Open `http://TARGET_IP:18090/sources/world` for a named
 source; product panels should call the existing source-scoped session API.
 
 ## Debian package
+
+Reconnect regression checks run without camera hardware:
+
+```bash
+go test -p 2 ./...
+XGC_MEDIA_LONG_TESTS=1 go test -p 2 ./internal/mediaedge -run TestCameraPeerDown60Seconds -count=1
+node web/scripts/test-reconnect.mjs --long
+```
+
+The source CI cell runs both 60-second outage tests. They measure CPU time,
+retry attempts, log lines, file descriptors and threads, then verify recovery.
+Install the existing web dependencies with `npm --prefix web ci` before the
+player check.
 
 Build the native `xgc2-media-edge` package:
 

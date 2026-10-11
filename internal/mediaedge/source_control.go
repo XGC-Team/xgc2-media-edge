@@ -65,6 +65,7 @@ type sourceRuntimeConfiguration struct {
 }
 
 type sourceControlResponse struct {
+	Ready                     *bool            `json:"ready,omitempty"`
 	ServiceRef                *xrpc.ServiceRef `json:"service_ref,omitempty"`
 	OK                        bool             `json:"ok"`
 	Error                     string           `json:"error,omitempty"`
@@ -390,6 +391,8 @@ func cloneSnapshotRenderPose(pose *SnapshotRenderPose) *SnapshotRenderPose {
 type cameraControl struct {
 	socket, instance, sourceID string
 	mu                         sync.Mutex
+	connectMu                  sync.Mutex
+	waitReady                  bool
 	client                     *httpx.Client
 	reference                  *xrpc.ServiceRef
 	maxCaptureBytes            int64
@@ -399,12 +402,14 @@ type cameraControl struct {
 func (control *cameraControl) boundInstance() string {
 	control.mu.Lock()
 	defer control.mu.Unlock()
+	if control.reference == nil {
+		return ""
+	}
 	return control.instance
 }
 
 // boundReference returns only the source-owned reference observed in discovery.
-// It keeps the bound incarnation after a source restart; SDK fencing, rather
-// than rediscovery or replay, detects that the owner is now stale.
+// Only discovery can publish a source-owned reference.
 func (control *cameraControl) boundReference() (xrpc.ServiceRef, bool) {
 	control.mu.Lock()
 	defer control.mu.Unlock()
@@ -416,22 +421,28 @@ func (control *cameraControl) boundReference() (xrpc.ServiceRef, bool) {
 
 func (control *cameraControl) close() {
 	control.mu.Lock()
-	defer control.mu.Unlock()
-	if control.client != nil {
-		control.client.Close()
+	client := control.client
+	control.client = nil
+	control.reference = nil
+	control.instance = ""
+	control.mu.Unlock()
+	if client != nil {
+		client.Close()
 	}
 }
 func (control *cameraControl) transport(ctx context.Context) (*httpx.Client, error) {
+	control.connectMu.Lock()
+	defer control.connectMu.Unlock()
 	control.mu.Lock()
-	defer control.mu.Unlock()
-	if control.client != nil {
-		return control.client, nil
+	client := control.client
+	control.mu.Unlock()
+	if client != nil {
+		return client, nil
 	}
 	target, err := os.Hostname()
 	if err != nil {
 		return nil, err
 	}
-	expectedInstance := control.instance
 	reference := xrpc.ServiceRef{TargetID: target, Service: "camera-source", APIVersion: "v1", Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: control.socket}}
 	build := func(ref xrpc.ServiceRef) (*httpx.Client, error) {
 		maxCaptureBytes := control.maxCaptureBytes
@@ -455,7 +466,7 @@ func (control *cameraControl) transport(ctx context.Context) (*httpx.Client, err
 		}
 		return httpx.New(options)
 	}
-	client, err := build(reference)
+	client, err = build(reference)
 	if err != nil {
 		return nil, err
 	}
@@ -465,7 +476,11 @@ func (control *cameraControl) transport(ctx context.Context) (*httpx.Client, err
 			client.Close()
 			return nil, err
 		}
-		data, status, _, err := client.Do(ctx, http.MethodGet, "/v1/describe", id, "", nil)
+		path := "/v1/describe"
+		if control.waitReady {
+			path += "?wait_ready_ms=30000"
+		}
+		data, status, _, err := client.Do(ctx, http.MethodGet, path, id, "", nil)
 		client.Close()
 		if err != nil {
 			return nil, err
@@ -487,17 +502,19 @@ func (control *cameraControl) transport(ctx context.Context) (*httpx.Client, err
 		if reference.TargetID != target || reference.Endpoint.Kind != "unix" || reference.Endpoint.Address != control.socket || reference.Service != "camera-source" || reference.APIVersion != "v1" {
 			return nil, errors.New("camera discovery reference does not match local endpoint")
 		}
-		if expectedInstance != "" && reference.InstanceID != expectedInstance {
-			return nil, errors.New("camera discovery reference does not match configured incarnation")
+		if description.Ready != nil && !*description.Ready {
+			return nil, errors.New("camera source is not ready")
 		}
 		client, err = build(reference)
 		if err != nil {
 			return nil, err
 		}
 	}
+	control.mu.Lock()
 	control.client = client
 	control.instance = reference.InstanceID
 	control.reference = &reference
+	control.mu.Unlock()
 	return client, nil
 }
 
@@ -508,6 +525,16 @@ func callSourceControl(ctx context.Context, socket string, request sourceControl
 	defer control.close()
 	return control.call(ctx, request)
 }
+
+type sourceControlHTTPError struct {
+	status int
+	body   string
+}
+
+func (err *sourceControlHTTPError) Error() string {
+	return fmt.Sprintf("camera HTTP %d: %s", err.status, err.body)
+}
+
 func (control *cameraControl) call(ctx context.Context, request sourceControlRequest) (sourceControlResponse, []byte, []byte, error) {
 	timeout := sourceControlRequestTimeout
 	if request.Operation == "capture" {
@@ -519,6 +546,26 @@ func (control *cameraControl) call(ctx context.Context, request sourceControlReq
 	if err != nil {
 		return sourceControlResponse{}, nil, nil, err
 	}
+	return control.callClient(ctx, client, request)
+}
+
+func (control *cameraControl) callBound(ctx context.Context, request sourceControlRequest) (sourceControlResponse, []byte, []byte, error) {
+	control.mu.Lock()
+	client := control.client
+	control.mu.Unlock()
+	if client == nil {
+		return sourceControlResponse{}, nil, nil, ErrSourceUnavailable
+	}
+	return control.callClient(ctx, client, request)
+}
+
+func (control *cameraControl) callClient(ctx context.Context, client *httpx.Client, request sourceControlRequest) (sourceControlResponse, []byte, []byte, error) {
+	timeout := sourceControlRequestTimeout
+	if request.Operation == "capture" {
+		timeout = sourceSnapshotRequestTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	if request.Operation != "describe" && request.Operation != "status" && request.Operation != "config" && request.Operation != "configure" && request.Operation != "start" && request.Operation != "stop" && request.Operation != "request-keyframe" && request.Operation != "capture" {
 		return sourceControlResponse{}, nil, nil, errors.New("unknown camera route")
 	}
@@ -551,7 +598,7 @@ func (control *cameraControl) call(ctx context.Context, request sourceControlReq
 	defer reply.Body.Close()
 	if reply.StatusCode != http.StatusOK {
 		data, _ := io.ReadAll(io.LimitReader(reply.Body, maximumControlHeaderBytes))
-		return sourceControlResponse{}, nil, nil, fmt.Errorf("camera HTTP %d: %s", reply.StatusCode, data)
+		return sourceControlResponse{}, nil, nil, &sourceControlHTTPError{status: reply.StatusCode, body: string(data)}
 	}
 	if request.Operation == "capture" {
 		maxBytes := control.maxCaptureBytes

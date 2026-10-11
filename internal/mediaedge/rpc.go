@@ -42,12 +42,13 @@ func (server *MediaMTXServer) startRPC() error {
 	options.DiscoveryPaths = []string{"/v1/describe"}
 	server.rpcHost, err = httpx.Serve(listener, lease, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet && request.URL.Path == "/v1/describe" {
-			writeJSON(writer, http.StatusOK, map[string]any{"service_ref": reference, "sources": server.SourceStatuses(), "capture": "/v1/media/sources/{sourceId}/capture", "limits": map[string]int{"max_sources": maximumSources, "max_sessions": server.config.MaxSessions, "max_operations": server.config.MaxOperations, "max_captures_per_source": 1, "snapshots_per_source": maximumSnapshots, "jpeg_bytes": maximumCameraJPEGBytes, "rgb_bytes": maximumCameraRGBBytes}})
+			sources := server.SourceStatuses()
+			writeJSON(writer, http.StatusOK, map[string]any{"service": "media-edge", "api_version": "v1", "instance_id": server.instanceID, "ready": !server.isClosing(), "facts": map[string]any{"sources": sources}, "service_ref": reference, "sources": sources, "capture": "/v1/media/sources/{sourceId}/capture", "limits": map[string]int{"max_sources": maximumSources, "max_sessions": server.config.MaxSessions, "max_operations": server.config.MaxOperations, "max_captures_per_source": 1, "snapshots_per_source": maximumSnapshots, "jpeg_bytes": maximumCameraJPEGBytes, "rgb_bytes": maximumCameraRGBBytes}})
 			return
 		}
 		parts := strings.Split(strings.Trim(request.URL.Path, "/"), "/")
 		if request.Method == http.MethodGet && request.URL.Path == "/v1/health" {
-			writeJSON(writer, http.StatusOK, map[string]any{"closing": server.isClosing(), "sources": server.SourceStatuses()})
+			writeJSON(writer, http.StatusOK, map[string]any{"ready": !server.isClosing(), "closing": server.isClosing(), "sources": server.SourceStatuses()})
 			return
 		}
 		if len(parts) == 5 && parts[0] == "v1" && parts[1] == "media" && parts[2] == "sources" && parts[4] == "ref" && request.Method == http.MethodGet {

@@ -106,13 +106,9 @@ func TestRealPythonSourceControlAndEdgeCapture(t *testing.T) {
 	if err = edge.Start(); err != nil {
 		t.Fatal(err)
 	}
-	restarted := false
 	defer func() {
 		err := edge.Close()
-		if restarted && err == nil {
-			t.Error("stale-source close pretended native stop succeeded")
-		}
-		if !restarted && err != nil {
+		if err != nil {
 			t.Errorf("edge close: %v", err)
 		}
 		edge.sources["python-camera"].controller().close()
@@ -159,7 +155,7 @@ func TestRealPythonSourceControlAndEdgeCapture(t *testing.T) {
 	}
 	// The calibration owner can use the returned source-owned reference directly;
 	// no inferred socket, environment bridge, or Edge RTP-only config projection.
-	sourceClient, err := httpx.New(httpx.Config{LocalTargetID: target, Service: sourceReference.Service, MaxResponseBytes: 1 << 20})
+	sourceClient, err := httpx.New(httpx.Config{LocalTargetID: sourceReference.Service.TargetID, Service: sourceReference.Service, MaxResponseBytes: 1 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,19 +254,20 @@ func TestRealPythonSourceControlAndEdgeCapture(t *testing.T) {
 	if control.boundInstance() != first {
 		t.Fatal("source instance did not bind discovery")
 	}
-	// Stop and restart the actual Python source. The old edge lease must fail
-	// closed; there is no implicit rediscovery followed by mutation replay.
+	// A restarted Python source gets the edge's latest desired lease through
+	// fresh discovery; capture requests themselves are never replayed.
 	if _, err = input.Write([]byte("restart\n")); err != nil {
 		t.Fatal(err)
 	}
 	second := ready()
-	restarted = true
 	if second == first {
 		t.Fatal("source reused incarnation")
 	}
-	if _, _, _, err = control.call(ctx, sourceControlRequest{Operation: "capture", SnapshotID: "stale"}); err == nil {
-		t.Fatal("stale source instance accepted capture")
+	eventually(t, 3*time.Second, func() bool {
+		status := edge.SourceStatuses()[0]
+		return status.ControlInstanceID == second && status.ControlHealthy && status.DesiredLeaseRevision == status.AppliedLeaseRevision
+	})
+	if _, _, _, err = control.call(ctx, sourceControlRequest{Operation: "capture", SnapshotID: "after-restart"}); err != nil {
+		t.Fatalf("fresh instance could not serve capture after lease replay: %v", err)
 	}
-	// Source restart is an external ownership change. Shutdown must retain
-	// uncertainty and return an error until the product owner replaces the edge.
 }
