@@ -62,6 +62,7 @@ required_files=(
   internal/mediaedge/source_control.go
   internal/mediaedge/source_controller.go
   pipelines/x264-fdsrc.json
+  pipelines/x264-ros-image.json
   pipelines/x264-v4l2src-raw.json
   internal/mediamtx/client.go
   internal/mediamtx/config.go

@@ -8,6 +8,7 @@ test -x /usr/bin/xgc-media-edge
 test -x /usr/lib/xgc2-media-edge/mediamtx
 test -x /usr/lib/xgc2-media-edge/prepare-runtime
 test -f /usr/share/xgc2-media-edge/pipelines/x264-fdsrc.json
+test -f /usr/share/xgc2-media-edge/pipelines/x264-ros-image.json
 test -f /usr/share/xgc2-media-edge/pipelines/x264-v4l2src-raw.json
 
 version="$(xgc-media-edge --version)"

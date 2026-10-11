@@ -1,0 +1,46 @@
+{
+  "name": "x264-ros-image",
+  "description": "H.264 RTP stream from a ROS image topic via the template-owned camera driver pipe with software x264, plus a one frame per second JPEG snapshot branch.",
+  "input": "stdin",
+  "snapshot": true,
+  "parameters": {
+    "topic": {
+      "description": "Absolute ROS image topic name",
+      "pattern": "/[A-Za-z0-9_/]{1,200}"
+    },
+    "rosDistro": {
+      "description": "ROS distribution providing the camera driver pipe",
+      "default": "noetic",
+      "pattern": "melodic|noetic"
+    },
+    "bitrateKbps": {
+      "description": "Target bitrate in kbit/s",
+      "default": "2500",
+      "pattern": "[0-9]{1,6}"
+    }
+  },
+  "producer": [
+    "/opt/ros/${rosDistro}/lib/xgc2_camera_driver/xgc2_ros_image_pipe",
+    "--topic", "${topic}", "--format", "bgr8",
+    "--width", "${width}", "--height", "${height}", "--max-fps", "${fps}"
+  ],
+  "command": [
+    "gst-launch-1.0", "-q", "fdsrc", "fd=0", "blocksize=262144", "!",
+    "rawvideoparse", "format=bgr", "width=${width}", "height=${height}", "framerate=${fps}/1", "!",
+    "videoconvert", "!",
+    "tee", "name=split",
+    "split.", "!",
+    "queue", "max-size-buffers=2", "leaky=downstream", "!",
+    "x264enc", "tune=zerolatency", "speed-preset=ultrafast", "key-int-max=${fps}", "bitrate=${bitrateKbps}", "byte-stream=true", "!",
+    "video/x-h264,profile=baseline", "!",
+    "h264parse", "config-interval=1", "!",
+    "rtph264pay", "pt=${payloadType}", "config-interval=1", "mtu=1200", "!",
+    "udpsink", "host=${rtpHost}", "port=${rtpPort}", "sync=false", "async=false",
+    "split.", "!",
+    "queue", "max-size-buffers=1", "leaky=downstream", "!",
+    "videorate", "drop-only=true", "!",
+    "video/x-raw,framerate=1/1", "!",
+    "jpegenc", "quality=90", "!",
+    "multifilesink", "location=${snapshotDir}/snapshot-%05d.jpg", "max-files=2", "post-messages=false"
+  ]
+}

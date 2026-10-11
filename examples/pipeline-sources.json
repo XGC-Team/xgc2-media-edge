@@ -36,9 +36,8 @@
       "fps": 30,
       "frameId": "sim_camera_optical_frame",
       "pipeline": {
-        "template": "x264-fdsrc",
-        "parameters": {"format": "bgr", "bitrateKbps": 2500},
-        "producer": ["/opt/ros/noetic/lib/xgc2_camera_driver/xgc2_ros_image_pipe", "--topic", "/sim/camera/image_raw", "--format", "bgr8"]
+        "template": "x264-ros-image",
+        "parameters": {"topic": "/sim/camera/image_raw", "rosDistro": "noetic", "bitrateKbps": 2500}
       }
     }
   ]

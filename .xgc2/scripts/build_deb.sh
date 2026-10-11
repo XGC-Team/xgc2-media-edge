@@ -97,6 +97,7 @@ EOF
 test -x "${pkg_root}/usr/bin/xgc-media-edge"
 test -f "${pkg_root}/usr/share/xgc2/process-definitions/xgc-media-edge.json"
 test -x "${pkg_root}/usr/lib/xgc2-media-edge/mediamtx"
+test -f "${pkg_root}/usr/share/xgc2-media-edge/pipelines/x264-ros-image.json"
 test "$("${pkg_root}/usr/bin/xgc-media-edge" --version)" = "${package_base_version}"
 
 artifact="${output_dir}/${package_name}_${version}_${arch}.deb"

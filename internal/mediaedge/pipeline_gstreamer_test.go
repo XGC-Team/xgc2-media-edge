@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"image/jpeg"
 	"net"
 	"os"
@@ -256,5 +257,75 @@ func TestShippedX264DeviceTemplatesAreValidGStreamerPipelines(t *testing.T) {
 				t.Fatalf("the pipeline did not fail on the device: %s", text)
 			}
 		})
+	}
+}
+
+func TestShippedX264ROSImageTemplateStreamsH264AndSnapshotsThroughGStreamer(t *testing.T) {
+	requireGStreamer(t, "fdsrc", "rawvideoparse", "videoconvert", "tee", "queue", "x264enc", "h264parse", "rtph264pay", "udpsink", "videorate", "jpegenc", "multifilesink")
+	observer := newRTPObserver(t)
+	templates, runtime := t.TempDir(), t.TempDir()
+	producerPID := filepath.Join(runtime, "producer.pid")
+	raw, err := os.ReadFile(filepath.Join(shippedTemplates, "x264-ros-image.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document pipelineTemplateDocument
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	// Replace only the ROS executable in a temporary template copy. The stub
+	// accepts its topic, format, size and rate arguments and writes BGR frames.
+	document.Producer = append([]string{testBinary(t), "fake-video"}, document.Producer[1:]...)
+	document.Producer = append(document.Producer, "--pid-file="+producerPID)
+	raw, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(templates, document.Name+".json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := pipelineTestSource("cam", observer.address(), "x264-ros-image", map[string]PipelineValue{"topic": "/sim/camera/image_raw", "bitrateKbps": "800"}, nil)
+	source.Width, source.Height = 160, 120
+	config, err := (Config{
+		ControlAddress: "127.0.0.1:0", PipelineTemplatesDir: templates, PipelineRuntimeDir: filepath.Join(runtime, "pipelines"),
+		Sources: []SourceConfig{source},
+	}).normalized()
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := &lockedBuffer{}
+	control := newPipelineControl(config.Sources[0], logs)
+	t.Cleanup(control.close)
+	if err := control.start(); err != nil {
+		t.Fatalf("start: %v\n%s", err, logs.String())
+	}
+	encoderPID := processesWithArgument("location=" + control.spec.snapshotDir + "/" + snapshotFilePattern)
+	if len(encoderPID) != 1 || !observer.waitFor(20, 5*time.Second) {
+		t.Fatalf("encoders = %v, RTP packets = %d\n%s", encoderPID, observer.count(), logs.String())
+	}
+	observer.mu.Lock()
+	if len(observer.payload) != 1 || !observer.payload[96] || !observer.nalTypes[7] || !observer.nalTypes[8] || !observer.nalTypes[5] {
+		t.Errorf("H264 RTP payloads = %v, NAL types = %v", observer.payload, observer.nalTypes)
+	}
+	observer.mu.Unlock()
+	yes := true
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	response, jpegBytes, rgb, err := control.call(ctx, sourceControlRequest{Operation: "capture", SnapshotID: "s", RequireFresh: &yes})
+	if err != nil {
+		t.Fatalf("capture: %v\n%s", err, logs.String())
+	}
+	if response.Width != 160 || response.Height != 120 || response.FrameID != "cam_optical" || len(rgb) != 160*120*3 {
+		t.Fatalf("capture = %+v rgb=%d", response, len(rgb))
+	}
+	if picture, err := jpeg.Decode(bytes.NewReader(jpegBytes)); err != nil || picture.Bounds().Dx() != 160 || picture.Bounds().Dy() != 120 {
+		t.Fatalf("snapshot JPEG: %v", err)
+	}
+	feeder := readPID(t, producerPID)
+	control.stop()
+	for _, pid := range []int{encoderPID[0], feeder} {
+		if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); !os.IsNotExist(err) {
+			t.Fatalf("process %d was not reaped: %v", pid, err)
+		}
 	}
 }

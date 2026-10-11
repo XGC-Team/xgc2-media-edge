@@ -18,6 +18,9 @@ def check_template(document):
     else:
         assert document["input"] == "stdin" and command.count("fdsrc") == 1, name
         assert "fd=0" in command and "rawvideoparse" in command and not devices, name
+    if "producer" in document:
+        assert document["input"] == "stdin" and isinstance(document["producer"], list), name
+        assert document["producer"] and all(isinstance(arg, str) and arg for arg in document["producer"]), name
     assert command.count("rtph264pay") == 1 and command.count("udpsink") == 1, name
     assert command.count("tee") == 1, (name, "snapshot and RTP share the same input")
     assert command.count("jpegenc") == 1 and document["snapshot"], name
@@ -29,7 +32,9 @@ def check(root):
         document = json.loads(path.read_text())
         check_template(document)
         templates[document["name"]] = document
-    assert len(templates) == 9, "three encoders with three source inputs each"
+    assert len(templates) == 10, "three encoders with three source inputs each and a ROS image template"
+    assert templates["x264-ros-image"]["producer"][0] == "/opt/ros/${rosDistro}/lib/xgc2_camera_driver/xgc2_ros_image_pipe"
+    assert "format=bgr" in templates["x264-ros-image"]["command"]
     for path in sorted((root / "examples").glob("*.json")):
         document = json.loads(path.read_text())
         devices = set()
@@ -46,7 +51,11 @@ def check(root):
                 assert device not in devices, (path, "a device cannot have two owners")
                 devices.add(device)
             else:
-                producer = pipeline["producer"]
+                if "producer" in template:
+                    assert "producer" not in pipeline, (path, "the template owns its producer")
+                    producer = template["producer"]
+                else:
+                    producer = pipeline["producer"]
                 assert Path(producer[0]).name == "xgc2_ros_image_pipe", (path, "ROS topics feed fdsrc")
                 assert "--topic" in producer and not any("/dev/" in arg for arg in producer), path
                 assert "device" not in pipeline.get("parameters", {}), path

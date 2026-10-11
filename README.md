@@ -262,6 +262,14 @@ like any other source.
         "parameters": {"format": "bgr", "bitrate": 2500000},
         "producer": ["/opt/ros/melodic/lib/xgc2_camera_driver/xgc2_ros_image_pipe", "--topic", "/d435/image_raw", "--format", "bgr8"]
       }
+    },
+    {
+      "id": "simulated_camera", "kind": "pipeline", "rtpListenAddress": "127.0.0.1:5008",
+      "width": 640, "height": 480, "fps": 30, "frameId": "sim_camera_optical_frame",
+      "pipeline": {
+        "template": "x264-ros-image",
+        "parameters": {"topic": "/sim/camera/image_raw", "rosDistro": "noetic", "bitrateKbps": 2500}
+      }
     }
   ]
 }
@@ -289,18 +297,29 @@ an argument. The edge supplies `width`, `height`, `fps`, `rtpHost`, `rtpPort`,
 | `x264-v4l2src-raw` | V4L2 device, raw video | software x264 | `device`, `format` (NV12), `bitrateKbps` (2500) |
 | `x264-v4l2src-mjpeg` | V4L2 device, motion JPEG | software x264 | `device`, `bitrateKbps` |
 | `x264-fdsrc` | raw frames on standard input | software x264 | `format` (bgr), `bitrateKbps` |
+| `x264-ros-image` | ROS image topic via a template-owned producer | software x264 | `topic`, `rosDistro` (noetic; melodic or noetic), `bitrateKbps` (2500) |
 | `nvv4l2-v4l2src-raw`, `-mjpeg`, `nvv4l2-fdsrc` | as above | Jetson `nvv4l2h264enc` | as above, with `bitrate` in bit/s (2500000) |
 | `mpp-v4l2src-raw`, `-mjpeg`, `mpp-fdsrc` | as above | Rockchip `mpph264enc` | as above, with `bitrate` in bit/s (2500000) |
 
-Simulated cameras use the same `-fdsrc` templates with `xgc2_ros_image_pipe`
-subscribing to the simulator's image topic, as in `examples/pipeline-sources.json`.
-The simulator owns the source; no station camera node is started for it.
+Simulated cameras use `x264-ros-image`, as in the example above and
+`examples/pipeline-sources.json`. The template runs
+`/opt/ros/${rosDistro}/lib/xgc2_camera_driver/xgc2_ros_image_pipe` with the
+absolute `topic`, `--format bgr8`, the edge-supplied `--width` and `--height`, and
+`--max-fps` set to the source's `fps`. The driver converts supported incoming
+encodings to bgr8, so the encoder is fixed to `format=bgr`. `topic` must match
+`/[A-Za-z0-9_/]{1,200}` and `rosDistro` must be `melodic` or `noetic`.
+The source must omit `producer`; supplying one is refused with the template's
+name. The simulator owns the source; no station camera node is started for it.
 
 Every template sets one IDR per second (the GOP is `fps` frames), repeats SPS and
 PPS with each of them, and packetizes with payload type 96 and MTU 1200. A
-template that reads standard input needs a `producer` in the source: its command
-line, whose standard output is that input. `xgc2_ros_image_pipe` of the camera
-driver writes the frames of a ROS image topic for the `-fdsrc` templates; its
+template that reads standard input needs a `producer` argument vector in the
+source unless it declares its own `producer` vector. Keeping `"input": "stdin"`
+for `x264-ros-image` uses the existing owned producer and encoder lifecycle
+without adding an input kind. A template-owned producer uses the same validated
+placeholders as the encoder and refuses a source-supplied producer; only an
+explicit template `producer` declaration supplies one. The camera driver's
+`xgc2_ros_image_pipe` writes the frames of a ROS image topic for the `-fdsrc` templates; its
 `--format` `rgb8`, `bgr8` and `mono8` are the `format` values `rgb`, `bgr` and
 `gray8`. A template with `"input": "device"` takes no producer. A template names
 itself, declares its parameters (`default`, `pattern`, `description`) and says
@@ -318,8 +337,10 @@ whether it has a snapshot branch:
 
 The software templates need the GStreamer tools and the `-good` and `-ugly`
 plugin sets (recommended by the package). The Jetson and Rockchip templates need
-the vendor plugins of the board. This repository tests the software templates
-with the real GStreamer; the vendor templates use the properties documented for
+the vendor plugins of the board. `x264-ros-image` also needs the camera driver's
+pipe installed for the selected ROS distribution and a reachable ROS master.
+This repository tests the software templates with the real GStreamer; the
+vendor templates use the properties documented for
 `nvv4l2h264enc` and `mpph264enc` and have not run on that hardware.
 
 ### Lifecycle

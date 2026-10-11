@@ -199,8 +199,15 @@ func runFakeVideo(arguments []string) int {
 	width := flags.Int("width", 160, "frame width")
 	height := flags.Int("height", 120, "frame height")
 	fps := flags.Int("fps", 10, "frames per second")
+	flags.IntVar(fps, "max-fps", 10, "frames per second for the ROS pipe stub")
+	flags.String("topic", "", "ROS topic for the ROS pipe stub")
+	format := flags.String("format", "bgr8", "pixel format for the ROS pipe stub")
 	pidFile := flags.String("pid-file", "", "file receiving the process ID")
 	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if *format != "bgr8" {
+		fmt.Fprintln(os.Stderr, "the video stub requires bgr8")
 		return 2
 	}
 	signal.Ignore(syscall.SIGPIPE)
