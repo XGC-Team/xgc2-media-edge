@@ -278,6 +278,10 @@ an argument. The edge supplies `width`, `height`, `fps`, `rtpHost`, `rtpPort`,
 | `nvv4l2-v4l2src-raw`, `-mjpeg`, `nvv4l2-fdsrc` | as above | Jetson `nvv4l2h264enc` | as above, with `bitrate` in bit/s (2500000) |
 | `mpp-v4l2src-raw`, `-mjpeg`, `mpp-fdsrc` | as above | Rockchip `mpph264enc` | as above, with `bitrate` in bit/s (2500000) |
 
+Simulated cameras use the same `-fdsrc` templates with `xgc2_ros_image_pipe`
+subscribing to the simulator's image topic, as in `examples/pipeline-sources.json`.
+The simulator owns the source; no station camera node is started for it.
+
 Every template sets one IDR per second (the GOP is `fps` frames), repeats SPS and
 PPS with each of them, and packetizes with payload type 96 and MTU 1200. A
 template that reads standard input needs a `producer` in the source: its command

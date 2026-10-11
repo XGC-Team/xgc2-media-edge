@@ -5,6 +5,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
+python3 tests/check_camera_rules.py
+
 bash -n .xgc2/scripts/*.sh
 export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-/tmp/xgc2-media-edge-pycache}"
 python3 -m py_compile \
