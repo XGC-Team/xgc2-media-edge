@@ -259,6 +259,7 @@ type testTemplate struct {
 	snapshot   bool
 	parameters map[string]pipelineParameterDocument
 	command    []string
+	producer   []string
 }
 
 func writeTestTemplate(t testing.TB, directory string, template testTemplate) {
@@ -281,8 +282,17 @@ func writeTestTemplate(t testing.TB, directory string, template testTemplate) {
 		}
 		parameters = "{" + strings.Join(items, ",") + "}"
 	}
-	document := fmt.Sprintf(`{"name":%q,"description":"test","input":%q,"snapshot":%t,"parameters":%s,"command":[%s]}`,
-		template.name, template.input, template.snapshot, parameters, strings.Join(quoted, ","))
+	producer := ""
+	if template.producer != nil {
+		arguments := append([]string{testBinary(t)}, template.producer...)
+		quotedProducer := make([]string, len(arguments))
+		for index, argument := range arguments {
+			quotedProducer[index] = strconv.Quote(argument)
+		}
+		producer = fmt.Sprintf(`,"producer":[%s]`, strings.Join(quotedProducer, ","))
+	}
+	document := fmt.Sprintf(`{"name":%q,"description":"test","input":%q,"snapshot":%t,"parameters":%s,"command":[%s]%s}`,
+		template.name, template.input, template.snapshot, parameters, strings.Join(quoted, ","), producer)
 	if err := os.WriteFile(filepath.Join(directory, template.name+".json"), []byte(document), 0o600); err != nil {
 		t.Fatal(err)
 	}

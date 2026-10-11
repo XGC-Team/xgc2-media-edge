@@ -85,8 +85,8 @@ type PipelineConfig struct {
 	// Parameters are the values of the template's own parameters.
 	Parameters map[string]PipelineValue `json:"parameters,omitempty"`
 	// Producer is the command whose standard output the pipeline reads as raw
-	// video. It is required by templates that read standard input and refused
-	// by the others.
+	// video. A standard input template requires it unless the template declares
+	// its own producer, in which case a source producer is refused.
 	Producer []string `json:"producer,omitempty"`
 
 	resolved *pipelineSpec
@@ -118,7 +118,7 @@ func (config PipelineConfig) normalized() (PipelineConfig, error) {
 	if err := checkPipelineArguments("pipeline producer", config.Producer); err != nil {
 		return PipelineConfig{}, err
 	}
-	config.Producer = append([]string(nil), config.Producer...)
+	config.Producer = slices.Clone(config.Producer)
 	return config, nil
 }
 
@@ -161,6 +161,7 @@ type pipelineTemplate struct {
 	snapshot   bool
 	parameters map[string]pipelineParameter
 	command    []string
+	producer   []string
 }
 
 type pipelineParameter struct {
@@ -175,6 +176,7 @@ type pipelineTemplateDocument struct {
 	Snapshot    bool                                 `json:"snapshot"`
 	Parameters  map[string]pipelineParameterDocument `json:"parameters"`
 	Command     []string                             `json:"command"`
+	Producer    []string                             `json:"producer,omitempty"`
 }
 
 type pipelineParameterDocument struct {
@@ -226,10 +228,18 @@ func parsePipelineTemplate(raw []byte) (*pipelineTemplate, error) {
 	if document.Input != pipelineInputDevice && document.Input != pipelineInputStdin {
 		return nil, fmt.Errorf("input must be %q or %q", pipelineInputDevice, pipelineInputStdin)
 	}
+	if document.Producer != nil {
+		if document.Input != pipelineInputStdin {
+			return nil, errors.New("a template producer requires standard input")
+		}
+		if len(document.Producer) == 0 {
+			return nil, errors.New("a template producer must have a command")
+		}
+	}
 	template := &pipelineTemplate{
 		name: document.Name, input: document.Input, snapshot: document.Snapshot,
 		parameters: make(map[string]pipelineParameter, len(document.Parameters)),
-		command:    document.Command,
+		command:    document.Command, producer: document.Producer,
 	}
 	for name, declared := range document.Parameters {
 		if !pipelineParameterName.MatchString(name) {
@@ -259,26 +269,34 @@ func parsePipelineTemplate(raw []byte) (*pipelineTemplate, error) {
 	if len(document.Command) == 0 {
 		return nil, errors.New("command is required")
 	}
-	if err := checkPipelineArguments("command", document.Command); err != nil {
-		return nil, err
-	}
-	if document.Command[0] != filepath.Base(document.Command[0]) && !filepath.IsAbs(document.Command[0]) {
-		return nil, errors.New("the command program must be a bare name or an absolute path")
-	}
 	usesSnapshot := false
-	for _, argument := range document.Command {
-		placeholders := pipelinePlaceholder.FindAllString(argument, -1)
-		if strings.Count(argument, "$") != len(placeholders) {
-			return nil, fmt.Errorf("argument %q has a $ that is not a ${name} placeholder", argument)
+	for _, vector := range []struct {
+		name      string
+		arguments []string
+	}{{"command", document.Command}, {"producer", document.Producer}} {
+		if err := checkPipelineArguments(vector.name, vector.arguments); err != nil {
+			return nil, err
 		}
-		for _, placeholder := range placeholders {
-			name := placeholder[2 : len(placeholder)-1]
-			if _, builtin := builtinPipelineParameters[name]; !builtin {
-				if _, declared := template.parameters[name]; !declared {
-					return nil, fmt.Errorf("argument %q uses the undeclared parameter %q", argument, name)
-				}
+		if len(vector.arguments) == 0 {
+			continue
+		}
+		if program := vector.arguments[0]; program != filepath.Base(program) && !filepath.IsAbs(program) {
+			return nil, fmt.Errorf("the %s program must be a bare name or an absolute path", vector.name)
+		}
+		for _, argument := range vector.arguments {
+			placeholders := pipelinePlaceholder.FindAllString(argument, -1)
+			if strings.Count(argument, "$") != len(placeholders) {
+				return nil, fmt.Errorf("argument %q has a $ that is not a ${name} placeholder", argument)
 			}
-			usesSnapshot = usesSnapshot || name == "snapshotDir"
+			for _, placeholder := range placeholders {
+				name := placeholder[2 : len(placeholder)-1]
+				if _, builtin := builtinPipelineParameters[name]; !builtin {
+					if _, declared := template.parameters[name]; !declared {
+						return nil, fmt.Errorf("argument %q uses the undeclared parameter %q", argument, name)
+					}
+				}
+				usesSnapshot = usesSnapshot || name == "snapshotDir"
+			}
 		}
 	}
 	if usesSnapshot != template.snapshot {
@@ -294,7 +312,10 @@ func parsePipelineTemplate(raw []byte) (*pipelineTemplate, error) {
 
 func (template *pipelineTemplate) resolve(source SourceConfig, scratchDir string) (*pipelineSpec, error) {
 	pipeline := source.Pipeline
-	if template.input == pipelineInputStdin && len(pipeline.Producer) == 0 {
+	if len(template.producer) != 0 && pipeline.Producer != nil {
+		return nil, fmt.Errorf("template %q declares its own producer and refuses a source-supplied producer", template.name)
+	}
+	if template.input == pipelineInputStdin && len(template.producer) == 0 && len(pipeline.Producer) == 0 {
 		return nil, fmt.Errorf("template %q reads video from standard input and needs a producer", template.name)
 	}
 	if template.input != pipelineInputStdin && len(pipeline.Producer) != 0 {
@@ -339,11 +360,18 @@ func (template *pipelineTemplate) resolve(source SourceConfig, scratchDir string
 		}
 		values[name] = value
 	}
-	spec.command = make([]string, len(template.command))
-	for index, argument := range template.command {
-		spec.command[index] = pipelinePlaceholder.ReplaceAllStringFunc(argument, func(placeholder string) string {
-			return values[placeholder[2:len(placeholder)-1]]
-		})
+	expand := func(arguments []string) []string {
+		expanded := make([]string, len(arguments))
+		for index, argument := range arguments {
+			expanded[index] = pipelinePlaceholder.ReplaceAllStringFunc(argument, func(placeholder string) string {
+				return values[placeholder[2:len(placeholder)-1]]
+			})
+		}
+		return expanded
+	}
+	spec.command = expand(template.command)
+	if len(template.producer) != 0 {
+		spec.producer = expand(template.producer)
 	}
 	return spec, nil
 }

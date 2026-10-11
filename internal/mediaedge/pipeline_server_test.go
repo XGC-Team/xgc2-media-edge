@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -177,6 +180,76 @@ func TestMediaEdgeStopsTheWholePipelineWhenItCloses(t *testing.T) {
 	}
 	if _, err := os.Stat(config.Sources[0].Pipeline.resolved.snapshotDir); err == nil {
 		t.Fatal("closing the media edge left a scratch directory")
+	}
+}
+
+func TestMediaEdgeRunsAndReapsATemplateOwnedProducerPair(t *testing.T) {
+	templates, runtime := t.TempDir(), t.TempDir()
+	sink := newUDPSink(t)
+	encoderPID, producerPID := filepath.Join(runtime, "encoder.pid"), filepath.Join(runtime, "producer.pid")
+	writeTestTemplate(t, templates, testTemplate{
+		name: "owned", input: "stdin", snapshot: true,
+		command: []string{"fake-pipeline", "--stdin", "--rtp=${rtpHost}:${rtpPort}", "--size=${width}x${height}",
+			"--snapshots=${snapshotDir}/" + snapshotFilePattern, "--pid-file=" + encoderPID},
+		producer: []string{"fake-producer", "--pid-file=" + producerPID, "--every=10ms"},
+	})
+	config, err := (Config{
+		ControlAddress: "127.0.0.1:0", SessionGracePeriod: time.Hour, PipelineTemplatesDir: templates, PipelineRuntimeDir: filepath.Join(runtime, "pipelines"),
+		Sources: []SourceConfig{pipelineTestSource("cam", sink.address(), "owned", nil, nil)},
+	}).normalized()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newMediaMTXServer(config, MediaMTXSettings{Stderr: &lockedBuffer{}}, newFakeMediaMTXControl("cam"), newFakeMediaMTXProcess())
+	t.Cleanup(func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{encoderPID, producerPID} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("a process started without a consumer: %s %v", path, err)
+		}
+	}
+	description, _, _, err := server.sources["cam"].controller().call(context.Background(), sourceControlRequest{Operation: "describe"})
+	_, port, _ := net.SplitHostPort(sink.address())
+	if err != nil || description.Codec != "H264" || description.RTPPayloadType != 96 || description.RTPClockRate != 90000 ||
+		description.RTPHost != "127.0.0.1" || strconv.Itoa(description.RTPPort) != port ||
+		description.Width != 64 || description.Height != 48 || description.FPS != 10 || description.FrameID != "cam_optical" ||
+		description.KeyframePolicy != "restart" || !description.KeyframeRequestSupported ||
+		!slices.Equal(description.Capabilities, []string{"start", "stop", "request-keyframe", "capture", "fresh-snapshot"}) {
+		t.Fatalf("describe = %+v %v", description, err)
+	}
+	if _, err := server.OpenSession(context.Background(), "cam", SessionOffer{SDP: "v=0\r\n"}); err != nil {
+		t.Fatal(err)
+	}
+	encoder, feeder := readPID(t, encoderPID), readPID(t, producerPID)
+	if encoder == feeder || !sink.waitFor(3, 3*time.Second) {
+		t.Fatal("the producer and encoder pair did not start and send RTP")
+	}
+	yes := true
+	snapshot, err := server.CaptureSnapshot(context.Background(), "cam", SnapshotCaptureRequest{RequireFresh: &yes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Width != 64 || snapshot.Height != 48 || snapshot.FrameID != "cam_optical" || snapshot.PixelFormat != "rgb8" ||
+		len(snapshot.JPEG) == 0 || len(snapshot.RGB) != 64*48*3 || snapshot.Sequence == 0 ||
+		snapshot.TimestampClockDomain != "system_realtime" || snapshot.CalibrationState != "unavailable" {
+		t.Fatalf("snapshot = %+v", snapshot)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, pid := range []int{encoder, feeder} {
+		if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); !os.IsNotExist(err) {
+			t.Fatalf("process %d was not reaped: %v", pid, err)
+		}
+	}
+	if _, err := os.Stat(config.Sources[0].Pipeline.resolved.snapshotDir); !os.IsNotExist(err) {
+		t.Fatalf("scratch directory remains: %v", err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -82,13 +83,77 @@ func TestEveryShippedTemplateLoadsAndExpands(t *testing.T) {
 }
 
 func TestTemplateInputDecidesWhetherAProducerIsRequired(t *testing.T) {
-	if _, err := resolveShipped(t, shippedSource("x264-fdsrc", nil, nil)); err == nil ||
-		!strings.Contains(err.Error(), "needs a producer") {
-		t.Fatalf("standard input template without producer: %v", err)
+	for _, name := range []string{"x264-fdsrc", "nvv4l2-fdsrc", "mpp-fdsrc"} {
+		if _, err := resolveShipped(t, shippedSource(name, nil, nil)); err == nil ||
+			!strings.Contains(err.Error(), "needs a producer") {
+			t.Fatalf("%s without producer: %v", name, err)
+		}
 	}
 	if _, err := resolveShipped(t, shippedSource("x264-v4l2src-raw", map[string]PipelineValue{"device": "/dev/video0"}, []string{"/bin/true"})); err == nil ||
 		!strings.Contains(err.Error(), "takes no producer") {
 		t.Fatalf("device template with producer: %v", err)
+	}
+}
+
+func TestTemplateOwnedProducerExpandsAndRefusesSourceProducer(t *testing.T) {
+	templates, runtime := t.TempDir(), t.TempDir()
+	writeTestTemplate(t, templates, testTemplate{
+		name: "owned", input: "stdin",
+		parameters: map[string]pipelineParameterDocument{"topic": {}},
+		command:    []string{"fake-pipeline", "--size=${width}x${height}"},
+		producer:   []string{"fake-producer", "--topic=${topic}", "--fps=${fps}"},
+	})
+	source := pipelineTestSource("cam", "127.0.0.1:5004", "owned", map[string]PipelineValue{"topic": "/sim/camera/image_raw"}, nil)
+	config := Config{ControlAddress: "127.0.0.1:0", PipelineTemplatesDir: templates, PipelineRuntimeDir: runtime, Sources: []SourceConfig{source}}
+	resolved, err := config.normalized()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := resolved.Sources[0].Pipeline.resolved
+	if want := []string{testBinary(t), "fake-pipeline", "--size=64x48"}; !slices.Equal(spec.command, want) {
+		t.Fatalf("command = %q, want %q", spec.command, want)
+	}
+	if want := []string{testBinary(t), "fake-producer", "--topic=/sim/camera/image_raw", "--fps=10"}; !slices.Equal(spec.producer, want) {
+		t.Fatalf("producer = %q, want %q", spec.producer, want)
+	}
+	for _, producer := range [][]string{{"/bin/true"}, {}} {
+		config.Sources[0].Pipeline.Producer = producer
+		if _, err := config.normalized(); err == nil || !strings.Contains(err.Error(), `template "owned" declares its own producer and refuses a source-supplied producer`) {
+			t.Fatalf("source producer %q: %v", producer, err)
+		}
+	}
+	// Existing source producers remain literal argument vectors.
+	producer := []string{"/bin/echo", "${width}"}
+	legacy, err := resolveShipped(t, shippedSource("x264-fdsrc", nil, producer))
+	if err != nil || !slices.Equal(legacy.Pipeline.resolved.producer, producer) {
+		t.Fatalf("source producer changed: %+v %v", legacy, err)
+	}
+}
+
+func TestMalformedTemplateProducersAreRejected(t *testing.T) {
+	good := `{"name":"t","input":"stdin","parameters":{"topic":{}},"command":["encoder"],"producer":["/opt/ros/pipe","--topic","${topic}"]}`
+	if _, err := parsePipelineTemplate([]byte(good)); err != nil {
+		t.Fatal(err)
+	}
+	for name, replacement := range map[string][2]string{
+		"device input":           {`"input":"stdin"`, `"input":"device"`},
+		"empty vector":           {`["/opt/ros/pipe","--topic","${topic}"]`, `[]`},
+		"shell line":             {`["/opt/ros/pipe","--topic","${topic}"]`, `"/opt/ros/pipe --topic /sim/image_raw"`},
+		"relative program":       {`/opt/ros/pipe`, `bin/pipe`},
+		"empty program":          {`/opt/ros/pipe`, ``},
+		"NUL argument":           {`--topic`, `--topic\u0000`},
+		"undeclared parameter":   {`${topic}`, `${unknown}`},
+		"stray dollar":           {`${topic}`, `$topic`},
+		"unterminated parameter": {`${topic}`, `${topic`},
+		"too long argument":      {`--topic`, strings.Repeat("x", maximumPipelineArgumentBytes+1)},
+		"too many arguments":     {`["/opt/ros/pipe","--topic","${topic}"]`, `["pipe"` + strings.Repeat(`,"x"`, maximumPipelineArguments) + `]`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			document := strings.Replace(good, replacement[0], replacement[1], 1)
+			if _, err := parsePipelineTemplate([]byte(document)); err == nil {
+				t.Fatalf("accepted %s", document)
+			}
+		})
 	}
 }
 
