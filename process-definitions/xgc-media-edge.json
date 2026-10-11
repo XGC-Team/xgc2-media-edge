@@ -1,0 +1,156 @@
+{
+  "apiVersion": "xgc.execution.process/v1",
+  "definitions": [
+    {
+      "id": "xgc-media-edge",
+      "version": "3.0.0",
+      "label": "XGC media edge",
+      "description": "Target-local XGC lifecycle and metadata control layer around pinned MediaMTX H264/RTP, WHEP/WebRTC fanout, fixed ICE and native fMP4 recording. Core and Agent are not in the media path.",
+      "parameters": {
+        "properties": {
+          "controlPort": {
+            "type": "integer",
+            "description": "Direct browser HTTP signaling and player port; calibration snapshots remain loopback-only",
+            "default": 18090,
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "allowedOrigins": {
+            "type": "string",
+            "description": "Comma-separated exact HTTP(S) WebUI origins allowed to create direct browser sessions",
+            "default": "http://localhost:8787,http://127.0.0.1:8787,http://localhost:5173,http://127.0.0.1:5173"
+          },
+          "iceCredential": {
+            "type": "string",
+            "default": "",
+            "sensitive": true
+          },
+          "iceUDPPort": {
+            "type": "integer",
+            "description": "Fixed MediaMTX direct WebRTC ICE UDP listener",
+            "default": 18189,
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "iceServerUrls": {
+            "type": "string",
+            "description": "Comma-separated STUN/TURN URLs; the target learns no ground-station IP",
+            "default": ""
+          },
+          "iceUsername": {
+            "type": "string",
+            "default": "",
+            "sensitive": true
+          },
+          "publicIPs": {
+            "type": "string",
+            "description": "Comma-separated public 1:1 NAT addresses when direct host candidates are used",
+            "default": ""
+          },
+          "recordingEnabled": {
+            "type": "boolean",
+            "description": "Enable the loopback-only, H264 stream-copy recording API; output is confined to the execution artifact root",
+            "default": false
+          },
+          "recordingMaxBitrate": {
+            "type": "integer",
+            "description": "Configured source peak bitrate in bits/s used for conservative recording capacity admission; required when recording is enabled",
+            "default": 0,
+            "minimum": 0,
+            "maximum": 10000000000
+          },
+          "sessionGrace": {
+            "type": "string",
+            "description": "Idle delay before stopping the capture encoder",
+            "default": "10s"
+          },
+          "snapshotTTL": {
+            "type": "string",
+            "description": "Retention for immutable calibration frames",
+            "default": "2m"
+          },
+          "sourceRosterContent": {
+            "type": "json",
+            "description": "Source configuration encoded once at the native stdin boundary.",
+            "default": {
+              "sources": []
+            }
+          },
+          "recordingRoot": {
+            "type": "string",
+            "description": "Explicit product recording directory; used only when recordingEnabled is true.",
+            "default": "/tmp/xgc2/artifacts/media-recordings"
+          },
+          "rpcSocket": {
+            "type": "string",
+            "default": "",
+            "fixedOnly": true
+          },
+          "targetId": {
+            "type": "string",
+            "default": "local",
+            "fixedOnly": true
+          }
+        },
+        "required": []
+      },
+      "command": {
+        "executable": "xgc-media-edge",
+        "args": [
+          "--sources-stdin",
+          "--target-id",
+          "${targetId}",
+          "--rpc-socket",
+          "${rpcSocket}",
+          "--recording-enabled=${recordingEnabled}",
+          "--recording-root",
+          "${recordingRoot}",
+          "--control-address",
+          "0.0.0.0:${controlPort}",
+          "--webrtc-ice-udp-address",
+          "0.0.0.0:${iceUDPPort}",
+          "--allowed-origin",
+          "${allowedOrigins}",
+          "--ice-server",
+          "${iceServerUrls}",
+          "--ice-username",
+          "${iceUsername}",
+          "--ice-credential",
+          "${iceCredential}",
+          "--public-ip",
+          "${publicIPs}",
+          "--recording-max-bitrate",
+          "${recordingMaxBitrate}",
+          "--session-grace",
+          "${sessionGrace}",
+          "--snapshot-ttl",
+          "${snapshotTTL}"
+        ],
+        "stdinParameter": "sourceRosterContent",
+        "env": {
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        }
+      },
+      "services": [
+        {
+          "service": "media-edge",
+          "api_version": "v1",
+          "profile": "http.v1",
+          "endpointParameter": "rpcSocket"
+        }
+      ],
+      "readiness": {
+        "kind": "describe",
+        "startGraceMs": 15000,
+        "timeoutMs": 30000
+      },
+      "stop": {
+        "graceMs": 30000
+      },
+      "logs": {
+        "maxBytes": 1048576,
+        "files": 3
+      }
+    }
+  ]
+}

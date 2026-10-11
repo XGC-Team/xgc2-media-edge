@@ -65,6 +65,8 @@ install -d \
   "${pkg_root}/usr/share/xgc2-media-edge/pipelines" \
   "${pkg_root}/usr/share/doc/${package_name}"
 install -m 0755 "${binary}" "${pkg_root}/usr/bin/xgc-media-edge"
+install -D -m 0644 "${repo_root}/process-definitions/xgc-media-edge.json" \
+  "${pkg_root}/usr/share/xgc2/process-definitions/xgc-media-edge.json"
 install -m 0755 "${repo_root}/scripts/prepare_runtime.py" "${pkg_root}/usr/lib/xgc2-media-edge/prepare-runtime"
 install -m 0755 "${mediamtx_root}/mediamtx" \
   "${pkg_root}/usr/lib/xgc2-media-edge/mediamtx"
@@ -93,6 +95,7 @@ Description: Target-resident XGC2 media lifecycle and MediaMTX gateway
 EOF
 
 test -x "${pkg_root}/usr/bin/xgc-media-edge"
+test -f "${pkg_root}/usr/share/xgc2/process-definitions/xgc-media-edge.json"
 test -x "${pkg_root}/usr/lib/xgc2-media-edge/mediamtx"
 test "$("${pkg_root}/usr/bin/xgc-media-edge" --version)" = "${package_base_version}"
 

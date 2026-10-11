@@ -3,6 +3,7 @@
 set -euo pipefail
 
 dpkg -s xgc2-media-edge >/dev/null
+test -f /usr/share/xgc2/process-definitions/xgc-media-edge.json
 test -x /usr/bin/xgc-media-edge
 test -x /usr/lib/xgc2-media-edge/mediamtx
 test -x /usr/lib/xgc2-media-edge/prepare-runtime
@@ -21,6 +22,7 @@ help="$(xgc-media-edge --help 2>&1)"
 grep -q -- '-control-address' <<<"${help}"
 grep -q -- '127.0.0.1:18090' <<<"${help}"
 grep -q -- '-sources-config' <<<"${help}"
+grep -q -- '-sources-stdin' <<<"${help}"
 grep -q -- '-rpc-socket' <<<"${help}"
 grep -q -- '-mediamtx-executable' <<<"${help}"
 grep -q -- '-pipeline-templates' <<<"${help}"
