@@ -190,6 +190,7 @@ func (config Config) normalized() (Config, error) {
 	seen := make(map[string]struct{}, len(config.Sources))
 	seenSockets := make(map[string]struct{}, len(config.Sources))
 	seenRTP := make(map[string]struct{}, len(config.Sources))
+	seenDevices := make(map[string]struct{}, len(config.Sources))
 	for index := range config.Sources {
 		source, err := config.Sources[index].normalized()
 		if err != nil {
@@ -215,6 +216,16 @@ func (config Config) normalized() (Config, error) {
 			return Config{}, errors.New("media sources must not share an RTP listener")
 		}
 		seenRTP[source.RTPListenAddress] = struct{}{}
+		if source.Kind == SourceKindPipeline {
+			for _, argument := range source.Pipeline.resolved.command {
+				if strings.HasPrefix(argument, "device=/dev/") {
+					if _, duplicate := seenDevices[argument]; duplicate {
+						return Config{}, errors.New("media pipelines must not share a camera device")
+					}
+					seenDevices[argument] = struct{}{}
+				}
+			}
+		}
 		config.Sources[index] = source
 	}
 	for _, publicIP := range config.PublicIPs {

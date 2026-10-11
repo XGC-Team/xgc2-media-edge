@@ -253,6 +253,11 @@ func TestSourcesMayNotShareARuntimeResource(t *testing.T) {
 	}
 	second.RTPListenAddress = "127.0.0.1:5006"
 	config.Sources = []SourceConfig{first, second}
+	if _, err := config.normalized(); err == nil || !strings.Contains(err.Error(), "camera device") {
+		t.Fatalf("two sources on one camera device: %v", err)
+	}
+	second.Pipeline = &PipelineConfig{Template: first.Pipeline.Template, Parameters: map[string]PipelineValue{"device": "/dev/video1"}}
+	config.Sources = []SourceConfig{first, second}
 	normalized, err := config.normalized()
 	if err != nil {
 		t.Fatal(err)
