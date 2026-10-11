@@ -140,6 +140,8 @@ Each source owns one XRPC `http.v1` Unix socket beneath an owned 0700 runtime
 directory, with a fresh process incarnation and socket mode 0600. Edge discovers
 GET `/v1/describe`, binds its returned `service_ref`, and validates GET
 `/v1/media/sources/{sourceId}/describe` before opening the media listener.
+XRPC matches discovery by path only, so GET `/v1/describe?wait_ready_ms=N`
+remains an unbound discovery request.
 
 The source descriptor is authoritative for loopback H264/RTP payload 96 at
 90 kHz, fixed destination port, geometry, cadence, optical frame and capabilities.
@@ -209,10 +211,13 @@ each reconcile pass has four cleanup attempts and a shared two-second deadline.
 Unknown absence retains ownership until creation/deletion is observed or the
 managed MediaMTX child has actually exited.
 
-The process snapshots `XGC2_XRPC_` policy once at startup and gives the same
-immutable SDK policy to browser/private hosts and source client pools. Explicit
-settings for unimplemented diagnostics, client registry or gRPC roles fail
-startup. Effective values and policy sources appear in private discovery.
+Browser/private hosts and source client pools use plain transport limits from
+`Config`. Defaults are 32 host connections, 16 admitted host calls (the domain
+operation limit), two connections and at most four admitted calls per source,
+16 KiB headers, 300 KiB requests, and the capture budget plus 128 KiB for response
+metadata and part headers. Call, header, idle and shutdown timeouts are 15, 3, 30
+and 5 seconds. Lower host call and response limits also constrain domain operation
+and capture admission. Private discovery publishes the domain limits.
 
 ## Pipeline sources
 

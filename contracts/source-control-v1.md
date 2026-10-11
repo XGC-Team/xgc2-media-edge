@@ -122,6 +122,8 @@ admission. Local capture uses the private `--rpc-socket`, service `media-edge`,
 GET `/v1/describe` then an instance-bound POST
 `/v1/media/sources/{sourceId}/capture`. The response follows the multipart
 contract above; DELETE `/v1/media/snapshots/{snapshotId}` releases retention.
+Discovery matches the path only: GET `/v1/describe?wait_ready_ms=N` remains
+unbound even with a query string.
 Public browser routes carry player assets, health and session signaling;
 recording control remains restricted to loopback callers. Internal frame capture
 never uses an unfenced browser signaling route. CLI `--rpc-socket` is a required
@@ -130,12 +132,11 @@ explicit deployment grant. It has no `/tmp` fallback. The installed
 and owned 0700 control/MediaMTX children for a specified numeric UID/GID. It
 rejects existing foreign/misconfigured directories and symlink ancestors.
 
-The process composition root snapshots `XGC2_XRPC_` settings once and passes the
-same SDK RuntimePolicy to public/private hosts and every source client. Explicit
-settings for absent diagnostics, client-registry or gRPC owners fail startup.
-Host call/connection/byte/time limits and source client pool limits execute at
-their owners; product operation/capture admission also respects lower limits.
-The private discovery response publishes the effective policy and its sources.
+Public/private hosts and every source client use plain limits from media-edge's
+`Config`. Host call/connection/byte/time limits and source client pool limits
+execute at their owners; product operation/capture admission also respects lower
+host call and response limits. The private discovery response publishes domain
+limits.
 
 WHEP creation uses a fresh token and one native POST. A lost creation response
 holds its session slot and source demand. Edge matches a complete finite native
