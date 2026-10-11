@@ -1558,6 +1558,7 @@ func (source *mediaMTXSource) controller() sourceController {
 			socket: source.config.ControlSocket, instance: source.config.ControlInstanceID,
 			sourceID: source.config.ID, maxCaptureBytes: config.MaxCaptureBytes,
 			clientConfig: httpx.Config{
+				LocalTargetID:  config.TargetID,
 				MaxConnections: config.ClientMaxConnections, MaxInFlight: min(4, config.HostMaxInFlight),
 				MaxRequestBytes: config.MaxRequestBytes, MaxResponseBytes: config.MaxResponseBytes,
 				MaxHeaderBytes: int64(config.MaxHeaderBytes), MaxCallTime: config.CallTimeout,

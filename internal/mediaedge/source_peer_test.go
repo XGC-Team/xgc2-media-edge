@@ -38,8 +38,7 @@ func startRestartingCamera(t *testing.T, socket, address, instance string) *rest
 	description := defaultCaptureDescription()
 	_, portText, _ := net.SplitHostPort(address)
 	description.RTPPort, _ = strconv.Atoi(portText)
-	target, _ := os.Hostname()
-	ref := xrpc.ServiceRef{TargetID: target, Service: "camera-source", APIVersion: "v1", InstanceID: instance,
+	ref := xrpc.ServiceRef{TargetID: "peer-test", Service: "camera-source", APIVersion: "v1", InstanceID: instance,
 		Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: socket}}
 	camera.server = &http.Server{ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Xrpc-Instance-ID", instance)
@@ -47,7 +46,7 @@ func startRestartingCamera(t *testing.T, socket, address, instance string) *rest
 			if r.Header.Get("X-Xrpc-Instance-ID") != "" || r.URL.Query().Get("wait_ready_ms") != "30000" {
 				t.Error("readiness discovery must be unbound and held when not ready")
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"service_ref": ref, "ready": true})
+			_ = json.NewEncoder(w).Encode(cameraDiscovery(ref))
 			return
 		}
 		if r.Header.Get("X-Xrpc-Instance-ID") != instance {

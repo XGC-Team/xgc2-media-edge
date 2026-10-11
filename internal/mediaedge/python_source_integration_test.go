@@ -96,7 +96,8 @@ func TestRealPythonSourceControlAndEdgeCapture(t *testing.T) {
 		}
 	}
 	first := ready()
-	config, err := (Config{TargetID: "python-fixture", ControlAddress: "127.0.0.1:0", RPCSocket: filepath.Join(directory, "edge", "control.sock"), SessionGracePeriod: time.Hour, Sources: []SourceConfig{{ID: "python-camera", RTPListenAddress: address, ControlSocket: socket}}}).normalized()
+	localTarget, _ := os.Hostname()
+	config, err := (Config{TargetID: localTarget, ControlAddress: "127.0.0.1:0", RPCSocket: filepath.Join(directory, "edge", "control.sock"), SessionGracePeriod: time.Hour, Sources: []SourceConfig{{ID: "python-camera", RTPListenAddress: address, ControlSocket: socket}}}).normalized()
 	if err != nil {
 		t.Fatal(err)
 	}

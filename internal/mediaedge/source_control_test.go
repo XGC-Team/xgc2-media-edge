@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	xrpc "github.com/XGC-Team/xgc2-xrpc/go"
+	"github.com/XGC-Team/xgc2-xrpc/go/httpx"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -38,7 +39,11 @@ func TestBoundSourceReferenceRequiresDiscoveryAndUsesObservedIncarnation(t *test
 	defer cancel()
 	source := newCaptureControl(t)
 	defer source.close()
-	control := &cameraControl{socket: source.socket, instance: "test-instance", sourceID: "camera"}
+	source.descriptionMu.Lock()
+	source.reference.TargetID = "explicit-station-target"
+	source.descriptionMu.Unlock()
+	clientConfig := httpx.Config{LocalTargetID: "explicit-station-target"}
+	control := &cameraControl{socket: source.socket, instance: "test-instance", sourceID: "camera", clientConfig: clientConfig}
 	defer control.close()
 	if _, observed := control.boundReference(); observed {
 		t.Fatal("bootstrap configuration was exposed as an observed reference")
@@ -47,7 +52,7 @@ func TestBoundSourceReferenceRequiresDiscoveryAndUsesObservedIncarnation(t *test
 		t.Fatal(err)
 	}
 	ref, observed := control.boundReference()
-	if !observed || ref.InstanceID != "test-instance" || ref.Endpoint.Address != source.socket {
+	if !observed || ref.InstanceID != "test-instance" || ref.Endpoint.Address != source.socket || ref.TargetID != "explicit-station-target" {
 		t.Fatalf("discovery reference lost: %+v observed=%t", ref, observed)
 	}
 	ref.InstanceID = "replacement"
@@ -55,7 +60,7 @@ func TestBoundSourceReferenceRequiresDiscoveryAndUsesObservedIncarnation(t *test
 	if bound.InstanceID != "test-instance" {
 		t.Fatal("caller altered the transport owner incarnation")
 	}
-	wrong := &cameraControl{socket: source.socket, instance: "other-owner", sourceID: "camera"}
+	wrong := &cameraControl{socket: source.socket, instance: "other-owner", sourceID: "camera", clientConfig: clientConfig}
 	defer wrong.close()
 	if _, err := wrong.transport(ctx); err != nil {
 		t.Fatalf("discovery did not replace the bootstrap incarnation: %v", err)
@@ -74,6 +79,7 @@ type captureControl struct {
 	beforeReply         func(sourceControlRequest)
 	descriptionMu       sync.RWMutex
 	description         sourceControlResponse
+	reference           xrpc.ServiceRef
 	snapshotRenderPose  *SnapshotRenderPose
 	snapshotPoseFrameID string
 	once                sync.Once
@@ -120,7 +126,7 @@ func newCaptureControlAtWithHookAndDescription(
 		closed: make(chan struct{}), beforeReply: beforeReply, description: description,
 	}
 	target, _ := os.Hostname()
-	control.description.ServiceRef = &xrpc.ServiceRef{TargetID: target, Service: "camera-source", APIVersion: "v1", InstanceID: "test-instance", Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: socket}}
+	control.reference = xrpc.ServiceRef{TargetID: target, Service: "camera-source", APIVersion: "v1", InstanceID: "test-instance", Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: socket}}
 	control.server = &http.Server{Handler: http.HandlerFunc(control.handle), ReadHeaderTimeout: time.Second}
 	go control.server.Serve(listener)
 	return control
@@ -155,6 +161,13 @@ func (control *captureControl) handle(writer http.ResponseWriter, incoming *http
 		control.beforeReply(request)
 	}
 	if request.Operation == "describe" {
+		if incoming.URL.Path == "/v1/describe" {
+			control.descriptionMu.RLock()
+			reference := control.reference
+			control.descriptionMu.RUnlock()
+			_ = json.NewEncoder(writer).Encode(cameraDiscovery(reference))
+			return
+		}
 		control.descriptionMu.RLock()
 		description := control.description
 		control.descriptionMu.RUnlock()
@@ -191,6 +204,12 @@ func (control *captureControl) handle(writer http.ResponseWriter, incoming *http
 	contentType, body := cameraMultipartFixture(response, jpeg, rgb)
 	writer.Header().Set("Content-Type", contentType)
 	_, _ = writer.Write(body)
+}
+
+func cameraDiscovery(ref xrpc.ServiceRef) xrpc.Describe {
+	encoded, _ := json.Marshal(ref)
+	return xrpc.Describe{Service: ref.Service, APIVersion: ref.APIVersion, InstanceID: ref.InstanceID,
+		Ready: true, Facts: map[string]json.RawMessage{"service_ref": encoded}}
 }
 
 func defaultCaptureDescription() sourceControlResponse {

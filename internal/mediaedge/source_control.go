@@ -65,27 +65,25 @@ type sourceRuntimeConfiguration struct {
 }
 
 type sourceControlResponse struct {
-	Ready                     *bool            `json:"ready,omitempty"`
-	ServiceRef                *xrpc.ServiceRef `json:"service_ref,omitempty"`
-	OK                        bool             `json:"ok"`
-	Error                     string           `json:"error,omitempty"`
-	ProtocolVersion           int              `json:"protocolVersion,omitempty"`
-	SourceID                  string           `json:"sourceId,omitempty"`
-	ManagedSourceID           string           `json:"source_id,omitempty"`
-	Codec                     string           `json:"codec,omitempty"`
-	RTPPayloadType            int              `json:"rtpPayloadType,omitempty"`
-	RTPClockRate              int              `json:"rtpClockRate,omitempty"`
-	RTPHost                   string           `json:"rtpHost,omitempty"`
-	RTPPort                   int              `json:"rtpPort,omitempty"`
-	FPS                       float64          `json:"fps,omitempty"`
-	Capabilities              []string         `json:"capabilities,omitempty"`
-	KeyframeRequestSupported  bool             `json:"keyframeRequestSupported"`
-	KeyframePolicy            string           `json:"keyframePolicy"`
-	SnapshotJpegPolicy        string           `json:"snapshotJpegPolicy,omitempty"`
-	SnapshotJpegBackend       string           `json:"snapshotJpegBackend,omitempty"`
-	SnapshotJpegHardwareState string           `json:"snapshotJpegHardwareState,omitempty"`
-	SnapshotID                string           `json:"snapshotId,omitempty"`
-	FrameID                   string           `json:"frameId,omitempty"`
+	OK                        bool     `json:"ok"`
+	Error                     string   `json:"error,omitempty"`
+	ProtocolVersion           int      `json:"protocolVersion,omitempty"`
+	SourceID                  string   `json:"sourceId,omitempty"`
+	ManagedSourceID           string   `json:"source_id,omitempty"`
+	Codec                     string   `json:"codec,omitempty"`
+	RTPPayloadType            int      `json:"rtpPayloadType,omitempty"`
+	RTPClockRate              int      `json:"rtpClockRate,omitempty"`
+	RTPHost                   string   `json:"rtpHost,omitempty"`
+	RTPPort                   int      `json:"rtpPort,omitempty"`
+	FPS                       float64  `json:"fps,omitempty"`
+	Capabilities              []string `json:"capabilities,omitempty"`
+	KeyframeRequestSupported  bool     `json:"keyframeRequestSupported"`
+	KeyframePolicy            string   `json:"keyframePolicy"`
+	SnapshotJpegPolicy        string   `json:"snapshotJpegPolicy,omitempty"`
+	SnapshotJpegBackend       string   `json:"snapshotJpegBackend,omitempty"`
+	SnapshotJpegHardwareState string   `json:"snapshotJpegHardwareState,omitempty"`
+	SnapshotID                string   `json:"snapshotId,omitempty"`
+	FrameID                   string   `json:"frameId,omitempty"`
 	// TimestampNanoseconds is in the source clock domain. A Gazebo source uses
 	// simulation time, so calling it UnixNano would be materially incorrect.
 	TimestampNanoseconds int64 `json:"timestampNanoseconds,omitempty"`
@@ -439,9 +437,13 @@ func (control *cameraControl) transport(ctx context.Context) (*httpx.Client, err
 	if client != nil {
 		return client, nil
 	}
-	target, err := os.Hostname()
-	if err != nil {
-		return nil, err
+	target := control.clientConfig.LocalTargetID
+	if target == "" {
+		var err error
+		target, err = os.Hostname()
+		if err != nil {
+			return nil, err
+		}
 	}
 	reference := xrpc.ServiceRef{TargetID: target, Service: "camera-source", APIVersion: "v1", Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: control.socket}}
 	build := func(ref xrpc.ServiceRef) (*httpx.Client, error) {
@@ -466,7 +468,7 @@ func (control *cameraControl) transport(ctx context.Context) (*httpx.Client, err
 		}
 		return httpx.New(options)
 	}
-	client, err = build(reference)
+	client, err := build(reference)
 	if err != nil {
 		return nil, err
 	}
@@ -488,21 +490,27 @@ func (control *cameraControl) transport(ctx context.Context) (*httpx.Client, err
 		if status != http.StatusOK {
 			return nil, fmt.Errorf("camera discovery HTTP %d", status)
 		}
-		var description sourceControlResponse
-		if err := json.Unmarshal(data, &description); err != nil {
+		description, err := xrpc.ParseDescribe(data)
+		if err != nil {
 			return nil, err
 		}
-		if description.ServiceRef == nil {
-			return nil, errors.New("camera discovery omitted service_ref")
+		encodedReference, ok := description.Facts["service_ref"]
+		if !ok {
+			return nil, errors.New("camera discovery omitted facts.service_ref")
 		}
-		reference = *description.ServiceRef
+		if err := json.Unmarshal(encodedReference, &reference); err != nil {
+			return nil, err
+		}
 		if err := reference.ValidateInternal(); err != nil {
 			return nil, err
 		}
 		if reference.TargetID != target || reference.Endpoint.Kind != "unix" || reference.Endpoint.Address != control.socket || reference.Service != "camera-source" || reference.APIVersion != "v1" {
 			return nil, errors.New("camera discovery reference does not match local endpoint")
 		}
-		if description.Ready != nil && !*description.Ready {
+		if description.Service != reference.Service || description.APIVersion != reference.APIVersion || description.InstanceID != reference.InstanceID {
+			return nil, errors.New("camera discovery reference does not match service identity")
+		}
+		if !description.Ready {
 			return nil, errors.New("camera source is not ready")
 		}
 		client, err = build(reference)

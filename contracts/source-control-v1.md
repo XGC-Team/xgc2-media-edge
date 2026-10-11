@@ -17,7 +17,7 @@ observe the bound source before deciding whether to issue another operation.
 
 | Method | Route | Meaning |
 | --- | --- | --- |
-| GET | `/v1/describe` | Service discovery only: `service_ref` and source roster |
+| GET | `/v1/describe` | Standard XRPC readiness envelope; `facts.service_ref` and `facts.sources` carry the source discovery facts |
 | GET | `/v1/media/sources` | Metadata-only source roster |
 | GET | `/v1/media/sources/{sourceId}/describe` | Source descriptor |
 | GET | `/v1/media/sources/{sourceId}/status` | Desired/applied source state and native health |

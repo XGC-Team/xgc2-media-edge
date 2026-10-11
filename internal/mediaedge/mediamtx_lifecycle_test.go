@@ -48,7 +48,7 @@ func newLifecycleControlProbe(t *testing.T) *lifecycleControlProbe {
 		operation := pathBase(incoming.URL.Path)
 		if incoming.Method == http.MethodGet && incoming.URL.Path == "/v1/describe" {
 			target, _ := os.Hostname()
-			_ = json.NewEncoder(writer).Encode(sourceControlResponse{OK: true, ServiceRef: &xrpc.ServiceRef{TargetID: target, Service: "camera-source", APIVersion: "v1", InstanceID: "test-instance", Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: probe.socket}}})
+			_ = json.NewEncoder(writer).Encode(cameraDiscovery(xrpc.ServiceRef{TargetID: target, Service: "camera-source", APIVersion: "v1", InstanceID: "test-instance", Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "unix", Address: probe.socket}}))
 			return
 		}
 		if operation == "start" || operation == "stop" {

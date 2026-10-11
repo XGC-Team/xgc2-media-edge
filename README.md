@@ -138,7 +138,7 @@ the trusted network.
 The implemented shared contract is [source-control-v1](contracts/source-control-v1.md).
 Each source owns one XRPC `http.v1` Unix socket beneath an owned 0700 runtime
 directory, with a fresh process incarnation and socket mode 0600. Edge discovers
-GET `/v1/describe`, binds its returned `service_ref`, and validates GET
+GET `/v1/describe`, binds its returned `facts.service_ref`, and validates GET
 `/v1/media/sources/{sourceId}/describe` when a viewer, capture, or source-reference
 request first needs that peer. A missing source never blocks startup or edge
 readiness. Describe facts and health report each source's control state.
