@@ -10,11 +10,10 @@ XGC2 Core, and XGC2 Agent. Those systems produce media or coordinate processes;
 this repository owns only the media-edge executable and its protocols. Core and
 Agent are not part of a browser connection.
 
-The Gazebo camera product currently implements this RTP/Unix-socket source
-contract directly. The ROS USB camera driver publishes encoded camera data and
-timing into ROS, but does not itself provide the RTP/control adapter; a physical
-camera deployment must supply a separate conforming adapter before pairing that
-source with Media Edge.
+The Gazebo camera plugin and the XGC2 camera driver node implement this
+RTP/Unix-socket source contract directly. A device that has no such process of
+its own, such as a V4L2 camera on a robot or a ROS image topic, is run by the
+media edge itself as a [pipeline source](#pipeline-sources).
 
 ## Runtime boundary
 
@@ -215,6 +214,120 @@ immutable SDK policy to browser/private hosts and source client pools. Explicit
 settings for unimplemented diagnostics, client registry or gRPC roles fail
 startup. Effective values and policy sources appear in private discovery.
 
+## Pipeline sources
+
+A source normally is a process of its own that implements the camera-source
+contract. Where there is none, the edge runs the encoder: a source with
+`"kind": "pipeline"` names a template and its parameters. The edge starts the
+pipeline when the first viewer, capture or recording needs the source and stops it
+after `--session-grace` without consumers, so a camera device is open only while
+it is watched. The pipeline sends H264/RTP to the source's `rtpListenAddress`
+like any other source.
+
+```json
+{
+  "sources": [
+    {
+      "id": "fs150_cam", "kind": "pipeline", "rtpListenAddress": "127.0.0.1:5004",
+      "width": 640, "height": 480, "fps": 30, "frameId": "fs150_cam_optical_frame",
+      "pipeline": {
+        "template": "x264-v4l2src-raw",
+        "parameters": {"device": "/dev/video8", "format": "NV12", "bitrateKbps": 2500}
+      }
+    },
+    {
+      "id": "color", "kind": "pipeline", "rtpListenAddress": "127.0.0.1:5006",
+      "width": 640, "height": 480, "fps": 30, "frameId": "d435_optical_frame",
+      "pipeline": {
+        "template": "nvv4l2-fdsrc",
+        "parameters": {"format": "bgr", "bitrate": 2500000},
+        "producer": ["/opt/ros/melodic/lib/xgc2_camera_driver/xgc2_ros_image_pipe", "--topic", "/d435/image_raw", "--format", "bgr8"]
+      }
+    }
+  ]
+}
+```
+
+There is no descriptor to ask, so `width`, `height`, `fps` (an integer) and
+`frameId` are required and authoritative, `rtpListenAddress` must name a loopback
+IP address, and `controlSocket` is not allowed. `--pipeline-templates` (default
+`/usr/share/xgc2-media-edge/pipelines`) holds the templates and
+`--pipeline-runtime-dir` (default `/run/xgc2/media-edge/pipelines`, created by
+`prepare-runtime`) the scratch directory `<dir>/<sourceId>` of each source, owned
+by the edge user with mode 0700 and emptied on every start.
+
+### Templates
+
+A template is a JSON file with the argument vector of the pipeline. What runs is
+that vector, never a shell line. `${name}` placeholders in its arguments are
+filled with the parameters of the source, and a value that does not match its
+parameter's pattern is refused, so a parameter cannot add a pipeline element or
+an argument. The edge supplies `width`, `height`, `fps`, `rtpHost`, `rtpPort`,
+`payloadType` and, for a template with a snapshot branch, `snapshotDir`.
+
+| Template | Input | Encoder | Parameters (default) |
+| --- | --- | --- | --- |
+| `x264-v4l2src-raw` | V4L2 device, raw video | software x264 | `device`, `format` (NV12), `bitrateKbps` (2500) |
+| `x264-v4l2src-mjpeg` | V4L2 device, motion JPEG | software x264 | `device`, `bitrateKbps` |
+| `x264-fdsrc` | raw frames on standard input | software x264 | `format` (bgr), `bitrateKbps` |
+| `nvv4l2-v4l2src-raw`, `-mjpeg`, `nvv4l2-fdsrc` | as above | Jetson `nvv4l2h264enc` | as above, with `bitrate` in bit/s (2500000) |
+| `mpp-v4l2src-raw`, `-mjpeg`, `mpp-fdsrc` | as above | Rockchip `mpph264enc` | as above, with `bitrate` in bit/s (2500000) |
+
+Every template sets one IDR per second (the GOP is `fps` frames), repeats SPS and
+PPS with each of them, and packetizes with payload type 96 and MTU 1200. A
+template that reads standard input needs a `producer` in the source: its command
+line, whose standard output is that input. `xgc2_ros_image_pipe` of the camera
+driver writes the frames of a ROS image topic for the `-fdsrc` templates; its
+`--format` `rgb8`, `bgr8` and `mono8` are the `format` values `rgb`, `bgr` and
+`gray8`. A template with `"input": "device"` takes no producer. A template names
+itself, declares its parameters (`default`, `pattern`, `description`) and says
+whether it has a snapshot branch:
+
+```json
+{
+  "name": "x264-fdsrc",
+  "input": "stdin",
+  "snapshot": true,
+  "parameters": {"format": {"default": "bgr", "pattern": "rgb|bgr|gray8"}},
+  "command": ["gst-launch-1.0", "-q", "fdsrc", "fd=0", "!", "rawvideoparse", "format=${format}", "..."]
+}
+```
+
+The software templates need the GStreamer tools and the `-good` and `-ugly`
+plugin sets (recommended by the package). The Jetson and Rockchip templates need
+the vendor plugins of the board. This repository tests the software templates
+with the real GStreamer; the vendor templates use the properties documented for
+`nvv4l2h264enc` and `mpph264enc` and have not run on that hardware.
+
+### Lifecycle
+
+A pipeline source presents the camera-source contract to the rest of the edge:
+
+- `start` spawns the pipeline and returns when it has stayed up for half a
+  second; a pipeline that exits sooner fails the start with its last output.
+  `stop` interrupts it (SIGINT, so that GStreamer releases the device and the
+  hardware encoder) and kills what remains after 1.5 seconds. Starting a running
+  pipeline changes nothing.
+- The pipeline and its producer end together: whichever exits first ends the
+  other, and the source is `faulted` with the cause until the edge starts it
+  again, which its recovery does when a watched source stops sending. Both are
+  killed when the edge itself dies, so a crash cannot leave a camera held.
+- `request-keyframe` restarts the pipeline, whose stream begins with an IDR
+  (`keyframePolicy: "restart"`). A request within five seconds of the start is
+  coalesced, since the stream began with one and the template repeats one every
+  second.
+- `capture` needs the snapshot branch: one JPEG per second written to the
+  scratch directory, two files kept. It returns the newest complete file as JPEG
+  and, unless `includeRgb` is false, as decoded RGB8. With `requireFresh` it waits
+  for a file completed after the request. A template without the branch lacks the
+  `capture` capability and capture answers 501. There are no camera intrinsics
+  (`calibrationState: "unavailable"`), and the source clock is the system clock.
+- The pipeline's standard error goes to the edge's log, line by line, prefixed
+  with the source and the process.
+- There is no runtime configuration: `config` shows the RTP destination and
+  `configure` is refused. A pipeline source has no service reference, so
+  `/v1/media/sources/{sourceId}/ref` answers 404.
+
 ## Optional H264 recording
 
 Recording is disabled unless `--recording-root` is set. Enabling it also
@@ -377,8 +490,10 @@ sudo /usr/lib/xgc2-media-edge/prepare-runtime \
 
 ./.ci/bin/xgc-media-edge \
   --control-address 0.0.0.0:18090 \
+  --target-id "$(hostname)" \
   --rpc-socket /run/xgc2/media-edge/control/control.sock \
   --mediamtx-runtime-dir /run/xgc2/media-edge/mediamtx \
+  --pipeline-runtime-dir /run/xgc2/media-edge/pipelines \
   --allowed-origin http://192.168.1.20:3000 \
   --recording-root /var/lib/xgc2/media-recordings \
   --recording-max-bitrate 13500000 \

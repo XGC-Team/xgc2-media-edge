@@ -80,7 +80,7 @@ func TestGrantedRuntimePreparationRejectsExistingForeignModeAndSymlinks(t *testi
 	if err != nil {
 		t.Fatalf("runtime grant: %v %s", err, output)
 	}
-	for _, path := range []string{private, filepath.Join(private, "control"), filepath.Join(private, "mediamtx")} {
+	for _, path := range []string{private, filepath.Join(private, "control"), filepath.Join(private, "mediamtx"), filepath.Join(private, "pipelines")} {
 		info, err := os.Stat(path)
 		if err != nil || info.Mode().Perm() != 0700 {
 			t.Fatalf("grant mode at %s: %v", path, err)

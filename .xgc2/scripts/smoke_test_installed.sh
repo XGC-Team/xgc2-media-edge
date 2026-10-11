@@ -6,6 +6,8 @@ dpkg -s xgc2-media-edge >/dev/null
 test -x /usr/bin/xgc-media-edge
 test -x /usr/lib/xgc2-media-edge/mediamtx
 test -x /usr/lib/xgc2-media-edge/prepare-runtime
+test -f /usr/share/xgc2-media-edge/pipelines/x264-fdsrc.json
+test -f /usr/share/xgc2-media-edge/pipelines/x264-v4l2src-raw.json
 
 version="$(xgc-media-edge --version)"
 case "${version}" in
@@ -21,6 +23,8 @@ grep -q -- '127.0.0.1:18090' <<<"${help}"
 grep -q -- '-sources-config' <<<"${help}"
 grep -q -- '-rpc-socket' <<<"${help}"
 grep -q -- '-mediamtx-executable' <<<"${help}"
+grep -q -- '-pipeline-templates' <<<"${help}"
+grep -q -- '-pipeline-runtime-dir' <<<"${help}"
 grep -q -- '0.0.0.0:18189' <<<"${help}"
 if grep -Eq -- '-source-id|-rtp-listen-address|-source-control-socket|-width|-height|-fps|-frame-id|-transport|legacy-pion|recording-ffmpeg' <<<"${help}"; then
   echo "installed binary still exposes a retired source or media interface" >&2

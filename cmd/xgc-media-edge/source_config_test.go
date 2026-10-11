@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/lxk36/xgc2-media-edge/internal/mediaedge"
 )
 
 func TestResolveSourcesRequiresConfigPath(t *testing.T) {
@@ -73,5 +75,27 @@ func TestSourcesConfigRejectsOversizedDocument(t *testing.T) {
 	}
 	if _, err := loadSources(path); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversized sources config error = %v", err)
+	}
+}
+
+func TestCheckedInExampleRostersAreValid(t *testing.T) {
+	templates, err := filepath.Abs(filepath.Join("..", "..", "pipelines"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"two-sources.json", "pipeline-sources.json"} {
+		t.Run(name, func(t *testing.T) {
+			sources, err := resolveSources(filepath.Join("..", "..", "examples", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = mediaedge.NewMediaMTX(mediaedge.Config{
+				ControlAddress: "127.0.0.1:18090", PipelineTemplatesDir: templates, PipelineRuntimeDir: "/run/xgc2/media-edge/pipelines",
+				Sources: sources,
+			}, mediaedge.MediaMTXSettings{})
+			if err != nil {
+				t.Fatalf("example roster %s: %v", name, err)
+			}
+		})
 	}
 }

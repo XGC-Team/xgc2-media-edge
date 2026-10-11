@@ -1,0 +1,31 @@
+{
+  "sources": [
+    {
+      "id": "fs150_cam",
+      "kind": "pipeline",
+      "rtpListenAddress": "127.0.0.1:5004",
+      "width": 640,
+      "height": 480,
+      "fps": 30,
+      "frameId": "fs150_cam_optical_frame",
+      "pipeline": {
+        "template": "x264-v4l2src-raw",
+        "parameters": {"device": "/dev/video8", "format": "NV12", "bitrateKbps": 2500}
+      }
+    },
+    {
+      "id": "color",
+      "kind": "pipeline",
+      "rtpListenAddress": "127.0.0.1:5006",
+      "width": 640,
+      "height": 480,
+      "fps": 30,
+      "frameId": "d435_optical_frame",
+      "pipeline": {
+        "template": "x264-fdsrc",
+        "parameters": {"format": "bgr", "bitrateKbps": 2500},
+        "producer": ["/opt/ros/melodic/lib/xgc2_camera_driver/xgc2_ros_image_pipe", "--topic", "/d435/image_raw", "--format", "bgr8"]
+      }
+    }
+  ]
+}

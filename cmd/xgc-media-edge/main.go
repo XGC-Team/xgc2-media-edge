@@ -44,6 +44,8 @@ func main() {
 		mediaMTXICEUDPAddress    = flag.String("webrtc-ice-udp-address", "0.0.0.0:18189", "MediaMTX fixed WebRTC ICE UDP listener")
 		mediaMTXICETCPAddress    = flag.String("webrtc-ice-tcp-address", "", "optional MediaMTX fixed WebRTC ICE TCP listener")
 		mediaMTXInterfaceIPs     = flag.Bool("webrtc-interface-ips", true, "advertise target interface IPs as ICE candidates")
+		pipelineTemplates        = flag.String("pipeline-templates", "/usr/share/xgc2-media-edge/pipelines", "directory of the pipeline source templates")
+		pipelineRuntimeDir       = flag.String("pipeline-runtime-dir", "/run/xgc2/media-edge/pipelines", "granted absolute private scratch directory of pipeline sources")
 		sourcesConfig            = flag.String("sources-config", "", "JSON file containing local media sources")
 		sourcesStdin             = flag.Bool("sources-stdin", false, "read local media sources JSON from standard input")
 		allowedOrigins           multiString
@@ -105,6 +107,8 @@ func main() {
 		MaxRetainedSnapshotBytes: *maxRetainedSnapshotBytes,
 		AllowedOrigins:           append([]string(nil), allowedOrigins...),
 		Sources:                  sources,
+		PipelineTemplatesDir:     *pipelineTemplates,
+		PipelineRuntimeDir:       *pipelineRuntimeDir,
 		PublicIPs:                append([]string(nil), publicIPs...),
 		SessionGracePeriod:       *grace,
 		SnapshotTTL:              *snapshotTTL,

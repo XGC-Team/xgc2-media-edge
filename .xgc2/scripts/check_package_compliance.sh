@@ -54,8 +54,13 @@ required_files=(
   internal/mediaedge/http.go
   internal/mediaedge/mediamtx_server.go
   internal/mediaedge/mediamtx_recording.go
+  internal/mediaedge/pipeline_source.go
+  internal/mediaedge/pipeline_template.go
   internal/mediaedge/recording_contract.go
   internal/mediaedge/source_control.go
+  internal/mediaedge/source_controller.go
+  pipelines/x264-fdsrc.json
+  pipelines/x264-v4l2src-raw.json
   internal/mediamtx/client.go
   internal/mediamtx/config.go
   internal/mediamtx/process.go

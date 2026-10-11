@@ -42,7 +42,7 @@ def main():
                 if created and os.geteuid() == 0:
                     os.fchown(descriptor, args.uid, args.gid)
                 os.fchmod(descriptor, 0o700)
-        for child in ("control", "mediamtx"):
+        for child in ("control", "mediamtx", "pipelines"):
             try:
                 os.mkdir(child, 0o700, dir_fd=descriptor)
                 created = True
@@ -62,6 +62,7 @@ def main():
         os.close(descriptor)
     print("rpc_socket=" + path + "/control/control.sock")
     print("mediamtx_runtime_dir=" + path + "/mediamtx")
+    print("pipeline_runtime_dir=" + path + "/pipelines")
 
 
 if __name__ == "__main__":

@@ -153,6 +153,29 @@ completes creation before returning its full failure response; inventory is
 still checked rather than treating status alone as absence. Native cleanup
 errors retain ownership for retry.
 
+## Pipeline sources
+
+A source of kind `pipeline` has no process of its own to ask: media-edge runs
+the encoder pipeline and applies this contract to it directly, without an XRPC
+hop (README, "Pipeline sources"). The operations keep their meaning with these
+differences:
+
+- The descriptor is built from the source configuration, so geometry, cadence and
+  optical frame are mandatory there. It advertises `start`, `stop` and
+  `request-keyframe`, and `capture` with `fresh-snapshot` only when the template
+  has a snapshot branch. Capture without them is refused before the source is
+  started (HTTP 501 on the private API).
+- `keyframePolicy` is `"restart"`: a keyframe request restarts the pipeline,
+  whose stream begins with an IDR, unless it started less than five seconds ago.
+  The receipt's `completion` is then `"restarted"` or `"coalesced"`.
+- Lifecycle receipts carry `completion:"applied"` once the pipeline has stayed up
+  for half a second after `start`, or has been reaped after `stop`. State is
+  `faulted` with `last_error` when it ended by itself.
+- Capture returns the newest complete JPEG of the branch and, on request, its
+  RGB8 decoding. The frame sequence has the run of the pipeline in its upper 32
+  bits, the clock domain is `system_realtime`, and calibration is unavailable.
+- Configuration is read-only and there is no source-owned service reference.
+
 This contract is implemented and tested in isolated product fixtures. It does
 not claim packaging, deployed source images, physical camera, native Gazebo
 render acceptance, full 4K burst measurements or live station completion.

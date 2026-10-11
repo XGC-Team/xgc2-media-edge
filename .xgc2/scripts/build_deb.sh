@@ -62,11 +62,14 @@ install -d \
   "${pkg_root}/DEBIAN" \
   "${pkg_root}/usr/bin" \
   "${pkg_root}/usr/lib/xgc2-media-edge" \
+  "${pkg_root}/usr/share/xgc2-media-edge/pipelines" \
   "${pkg_root}/usr/share/doc/${package_name}"
 install -m 0755 "${binary}" "${pkg_root}/usr/bin/xgc-media-edge"
 install -m 0755 "${repo_root}/scripts/prepare_runtime.py" "${pkg_root}/usr/lib/xgc2-media-edge/prepare-runtime"
 install -m 0755 "${mediamtx_root}/mediamtx" \
   "${pkg_root}/usr/lib/xgc2-media-edge/mediamtx"
+install -m 0644 "${repo_root}"/pipelines/*.json \
+  "${pkg_root}/usr/share/xgc2-media-edge/pipelines/"
 install -m 0644 "${repo_root}/LICENSE" \
   "${pkg_root}/usr/share/doc/${package_name}/copyright"
 install -m 0644 "${mediamtx_root}/LICENSE.mediamtx" \
@@ -80,10 +83,13 @@ Priority: optional
 Architecture: ${arch}
 Maintainer: XGC2 <apt@example.com>
 Depends: ca-certificates, python3
+Recommends: gstreamer1.0-tools, gstreamer1.0-plugins-good, gstreamer1.0-plugins-ugly
 Description: Target-resident XGC2 media lifecycle and MediaMTX gateway
  Controls co-located ROS, camera, and simulator adapters while pinned MediaMTX
  handles H264/RTP ingest, WHEP/WebRTC fanout, and stream-copy fMP4 recording.
  The wrapper also serves immutable camera calibration snapshots and manifests.
+ Pipeline sources run a packaged GStreamer encoder template on demand; the
+ recommended packages provide the software x264 encoder they use.
 EOF
 
 test -x "${pkg_root}/usr/bin/xgc-media-edge"
