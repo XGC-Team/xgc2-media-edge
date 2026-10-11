@@ -2,7 +2,7 @@ module github.com/lxk36/xgc2-media-edge
 
 go 1.26.2
 
-require github.com/XGC-Team/xgc2-xrpc/go v0.0.0-20261009021126-35c2262358a3
+require github.com/XGC-Team/xgc2-xrpc/go v0.0.0-20261011013206-d33afa88c426
 
 require (
 	golang.org/x/net v0.46.1-0.20251013234738-63d1a5100f82 // indirect

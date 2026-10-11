@@ -393,7 +393,7 @@ type cameraControl struct {
 	client                     *httpx.Client
 	reference                  *xrpc.ServiceRef
 	maxCaptureBytes            int64
-	policy                     *xrpc.Policy
+	clientConfig               httpx.Config
 }
 
 func (control *cameraControl) boundInstance() string {
@@ -438,16 +438,20 @@ func (control *cameraControl) transport(ctx context.Context) (*httpx.Client, err
 		if maxCaptureBytes == 0 {
 			maxCaptureBytes = 64 << 20
 		}
-		options := httpx.Config{LocalTargetID: target, Service: ref, MaxConnections: 2, MaxInFlight: 4, MaxRequestBytes: 300 << 10, MaxResponseBytes: maxCaptureBytes + maximumControlHeaderBytes + 4*maximumCameraPartHeaderBytes}
-		if control.policy != nil {
-			var err error
-			options, err = (httpx.Config{LocalTargetID: target, Service: ref, MaxInFlight: 4}).WithPolicy(control.policy)
-			if err != nil {
-				return nil, err
-			}
-			if limit, err := control.policy.Integer("HOST_MAX_IN_FLIGHT"); err == nil && limit < int64(options.MaxInFlight) {
-				options.MaxInFlight = int(limit)
-			}
+		options := control.clientConfig
+		options.LocalTargetID = target
+		options.Service = ref
+		if options.MaxConnections == 0 {
+			options.MaxConnections = 2
+		}
+		if options.MaxInFlight == 0 {
+			options.MaxInFlight = 4
+		}
+		if options.MaxRequestBytes == 0 {
+			options.MaxRequestBytes = 300 << 10
+		}
+		if options.MaxResponseBytes == 0 {
+			options.MaxResponseBytes = maxCaptureBytes + maximumControlHeaderBytes + 4*maximumCameraPartHeaderBytes
 		}
 		return httpx.New(options)
 	}

@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-func policyFixtureConfig(t *testing.T) Config {
+func runtimeFixtureConfig(t *testing.T) Config {
 	t.Helper()
 	config, err := (Config{ControlAddress: "127.0.0.1:0", Sources: []SourceConfig{{ID: "camera", RTPListenAddress: "127.0.0.1:5004", ControlSocket: "/run/media-test/source.sock"}}}).normalized()
 	if err != nil {
@@ -23,29 +23,26 @@ func policyFixtureConfig(t *testing.T) Config {
 	return config
 }
 
-func TestRuntimePolicySnapshotExecutesHostAndClientSettings(t *testing.T) {
-	config := policyFixtureConfig(t)
-	environment := []string{"XGC2_XRPC_HOST_MAX_IN_FLIGHT=2", "XGC2_XRPC_HOST_MAX_CONNECTIONS=3", "XGC2_XRPC_CLIENT_MAX_CONNECTIONS=1", "XGC2_XRPC_MAX_RESPONSE_BYTES=4096", "XGC2_XRPC_SHUTDOWN_TIMEOUT_MS=2000"}
-	policy, err := ResolveRuntimePolicy(environment, config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	environment[0] = "XGC2_XRPC_HOST_MAX_IN_FLIGHT=99"
-	config.RuntimePolicy = policy
-	options, err := config.hostOptions(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if options.MaxInFlight != 2 || options.MaxConnections != 3 || options.MaxResponseBytes != 4096 || options.ShutdownTimeout.Milliseconds() != 2000 {
-		t.Fatalf("ignored host policy: %+v", options)
-	}
+func TestRuntimeLimitsExecuteHostAndClientSettings(t *testing.T) {
+	config := runtimeFixtureConfig(t)
+	config.HostMaxInFlight = 2
+	config.HostMaxConnections = 3
+	config.ClientMaxConnections = 1
+	config.MaxResponseBytes = 4096
+	config.ShutdownTimeout = 2 * time.Second
+	control := newCaptureControl(t)
+	defer control.close()
+	config.Sources[0].ControlSocket = control.socket
 	server := newMediaMTXServer(config, MediaMTXSettings{}, newFakeMediaMTXControl("camera"), newFakeMediaMTXProcess())
+	defer server.cancelLifecycle()
+	options := server.config.hostOptions(true)
+	if options.MaxInFlight != 2 || options.MaxConnections != 3 || options.MaxResponseBytes != 4096 || options.ShutdownTimeout.Milliseconds() != 2000 {
+		t.Fatalf("ignored host limits: %+v", options)
+	}
 	if server.config.MaxOperations != 2 || server.config.MaxCaptureBytes != 4096 {
 		t.Fatal("product domain admission ignored transport ceiling")
 	}
-	control := newCaptureControl(t)
-	defer control.close()
-	rpc := &cameraControl{socket: control.socket, sourceID: "camera", policy: policy}
+	rpc := server.sources["camera"].controller().(*cameraControl)
 	defer rpc.close()
 	client, err := rpc.transport(t.Context())
 	if err == nil || client != nil {
@@ -55,14 +52,7 @@ func TestRuntimePolicySnapshotExecutesHostAndClientSettings(t *testing.T) {
 	defer cancel()
 	client, err = rpc.transport(ctx)
 	if err != nil || client.Status().ConnectionLimit != 1 || client.Status().InFlightLimit != 2 {
-		t.Fatalf("source client pool did not execute policy: %v", err)
-	}
-	// Unsupported roles and malformed values are startup errors, not settings
-	// parsed successfully and then silently ignored by this composition.
-	for _, value := range []string{"XGC2_XRPC_LOG_LEVEL=debug", "XGC2_XRPC_CLIENT_MAX_REFERENCES=2", "XGC2_XRPC_GRPC_MAX_STREAMS_PER_CONNECTION=1", "XGC2_XRPC_HOST_MAX_IN_FLIGHT=03", "XGC2_XRPC_CLIENT_MAX_CONNECTIONS=3", "XGC2_XRPC_HOST_MAX_IN_FLIGHT=17"} {
-		if _, err := ResolveRuntimePolicy([]string{value}, config); err == nil {
-			t.Fatalf("unexecuted or invalid setting accepted: %s", value)
-		}
+		t.Fatalf("source client pool did not execute limits: %v", err)
 	}
 }
 
@@ -102,13 +92,9 @@ func TestGrantedRuntimePreparationRejectsExistingForeignModeAndSymlinks(t *testi
 	}
 }
 
-func TestBrowserHostExecutesResponseBytePolicyOnNativeTCP(t *testing.T) {
-	config := policyFixtureConfig(t)
-	var err error
-	config.RuntimePolicy, err = ResolveRuntimePolicy([]string{"XGC2_XRPC_MAX_RESPONSE_BYTES=1024"}, config)
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestBrowserHostExecutesResponseByteLimitOnNativeTCP(t *testing.T) {
+	config := runtimeFixtureConfig(t)
+	config.MaxResponseBytes = 1024
 	edge := newMediaMTXServer(config, MediaMTXSettings{}, newFakeMediaMTXControl("camera"), newFakeMediaMTXProcess())
 	defer edge.cancelLifecycle()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -138,7 +124,7 @@ func TestBrowserHostExecutesResponseBytePolicyOnNativeTCP(t *testing.T) {
 		body, bodyErr := io.ReadAll(reply.Body)
 		reply.Body.Close()
 		if len(body) > 1024 || (reply.StatusCode == 200 && bodyErr == nil) {
-			t.Fatal("public ServeEdge silently ignored MAX_RESPONSE_BYTES")
+			t.Fatal("public ServeEdge silently ignored response byte limit")
 		}
 	}
 }

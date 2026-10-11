@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	xrpc "github.com/XGC-Team/xgc2-xrpc/go"
 	"github.com/XGC-Team/xgc2-xrpc/go/httpx"
 	"io"
 	"math"
@@ -253,21 +254,43 @@ func newMediaMTXServer(
 	if config.MaxOperations == 0 {
 		config.MaxOperations = defaultMaxOperations
 	}
-	if config.RuntimePolicy != nil {
-		if limit, err := config.RuntimePolicy.Integer("HOST_MAX_IN_FLIGHT"); err == nil && limit < int64(config.MaxOperations) {
-			config.MaxOperations = int(limit)
-		}
+	if config.HostMaxInFlight == 0 {
+		config.HostMaxInFlight = config.MaxOperations
 	}
+	config.MaxOperations = min(config.MaxOperations, config.HostMaxInFlight)
 	if config.MaxCaptureBytes == 0 {
 		config.MaxCaptureBytes = 64 << 20
 	}
 	if config.MaxRetainedSnapshotBytes == 0 {
 		config.MaxRetainedSnapshotBytes = 128 << 20
 	}
-	if config.RuntimePolicy != nil {
-		if limit, err := config.RuntimePolicy.Integer("MAX_RESPONSE_BYTES"); err == nil && limit < config.MaxCaptureBytes {
-			config.MaxCaptureBytes = limit
-		}
+	if config.MaxResponseBytes == 0 {
+		config.MaxResponseBytes = config.MaxCaptureBytes + maximumControlHeaderBytes + 4*maximumCameraPartHeaderBytes
+	}
+	config.MaxCaptureBytes = min(config.MaxCaptureBytes, config.MaxResponseBytes)
+	if config.HostMaxConnections == 0 {
+		config.HostMaxConnections = xrpc.DefaultMaxConnections
+	}
+	if config.ClientMaxConnections == 0 {
+		config.ClientMaxConnections = 2
+	}
+	if config.MaxHeaderBytes == 0 {
+		config.MaxHeaderBytes = xrpc.DefaultMaxHeaderBytes
+	}
+	if config.MaxRequestBytes == 0 {
+		config.MaxRequestBytes = 300 << 10
+	}
+	if config.CallTimeout == 0 {
+		config.CallTimeout = 15 * time.Second
+	}
+	if config.HeaderTimeout == 0 {
+		config.HeaderTimeout = 3 * time.Second
+	}
+	if config.IdleTimeout == 0 {
+		config.IdleTimeout = xrpc.DefaultIdleTimeout
+	}
+	if config.ShutdownTimeout == 0 {
+		config.ShutdownTimeout = xrpc.DefaultShutdownTimeout
 	}
 	lifecycleContext, cancelLifecycle := context.WithCancel(context.Background())
 	server := &MediaMTXServer{
@@ -1372,7 +1395,7 @@ func (server *MediaMTXServer) Close() error {
 	}
 	select {
 	case <-server.operationsDrained:
-	case <-time.After(server.shutdownTimeout()):
+	case <-time.After(server.config.ShutdownTimeout):
 		return errors.Join(append(failures, errors.New("media operations have not drained"))...)
 	}
 	server.mu.RLock()
@@ -1386,7 +1409,7 @@ func (server *MediaMTXServer) Close() error {
 	}
 	server.mu.RUnlock()
 	var sessionFailures []error
-	cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), server.shutdownTimeout())
+	cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), server.config.ShutdownTimeout)
 	for _, session := range sessions {
 		if cleanupContext.Err() != nil {
 			sessionFailures = append(sessionFailures, cleanupContext.Err())
@@ -1482,7 +1505,17 @@ func (source *mediaMTXSource) controller() sourceController {
 			source.controlRPC = newPipelineControl(source.config, source.server.settings.Stderr)
 			return
 		}
-		source.controlRPC = &cameraControl{socket: source.config.ControlSocket, instance: source.config.ControlInstanceID, sourceID: source.config.ID, maxCaptureBytes: source.server.config.MaxCaptureBytes, policy: source.server.config.RuntimePolicy}
+		config := source.server.config
+		source.controlRPC = &cameraControl{
+			socket: source.config.ControlSocket, instance: source.config.ControlInstanceID,
+			sourceID: source.config.ID, maxCaptureBytes: config.MaxCaptureBytes,
+			clientConfig: httpx.Config{
+				MaxConnections: config.ClientMaxConnections, MaxInFlight: min(4, config.HostMaxInFlight),
+				MaxRequestBytes: config.MaxRequestBytes, MaxResponseBytes: config.MaxResponseBytes,
+				MaxHeaderBytes: int64(config.MaxHeaderBytes), MaxCallTime: config.CallTimeout,
+				HeaderTimeout: config.HeaderTimeout, IdleTimeout: config.IdleTimeout,
+			},
+		}
 	})
 	return source.controlRPC
 }

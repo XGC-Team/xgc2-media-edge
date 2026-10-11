@@ -100,10 +100,8 @@ func TestRealPythonSourceControlAndEdgeCapture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config.RuntimePolicy, err = ResolveRuntimePolicy([]string{"XGC2_XRPC_HOST_MAX_IN_FLIGHT=4", "XGC2_XRPC_CLIENT_MAX_CONNECTIONS=1"}, config)
-	if err != nil {
-		t.Fatal(err)
-	}
+	config.HostMaxInFlight = 4
+	config.ClientMaxConnections = 1
 	edge := newMediaMTXServer(config, MediaMTXSettings{}, newFakeMediaMTXControl("python-camera"), newFakeMediaMTXProcess())
 	if err = edge.Start(); err != nil {
 		t.Fatal(err)

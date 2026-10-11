@@ -37,17 +37,12 @@ func (server *MediaMTXServer) startRPC() error {
 		_ = lease.Close()
 		return err
 	}
-	options, err := server.config.hostOptions(true)
-	if err != nil {
-		_ = listener.Close()
-		_ = lease.Close()
-		return err
-	}
+	options := server.config.hostOptions(true)
 	options.InstanceID = server.instanceID
 	options.DiscoveryPaths = []string{"/v1/describe"}
 	server.rpcHost, err = httpx.Serve(listener, lease, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet && request.URL.Path == "/v1/describe" {
-			writeJSON(writer, http.StatusOK, map[string]any{"service_ref": reference, "sources": server.SourceStatuses(), "capture": "/v1/media/sources/{sourceId}/capture", "runtime_policy": server.config.effectivePolicy(), "limits": map[string]int{"max_sources": maximumSources, "max_sessions": server.config.MaxSessions, "max_operations": server.config.MaxOperations, "max_captures_per_source": 1, "snapshots_per_source": maximumSnapshots, "jpeg_bytes": maximumCameraJPEGBytes, "rgb_bytes": maximumCameraRGBBytes}})
+			writeJSON(writer, http.StatusOK, map[string]any{"service_ref": reference, "sources": server.SourceStatuses(), "capture": "/v1/media/sources/{sourceId}/capture", "limits": map[string]int{"max_sources": maximumSources, "max_sessions": server.config.MaxSessions, "max_operations": server.config.MaxOperations, "max_captures_per_source": 1, "snapshots_per_source": maximumSnapshots, "jpeg_bytes": maximumCameraJPEGBytes, "rgb_bytes": maximumCameraRGBBytes}})
 			return
 		}
 		parts := strings.Split(strings.Trim(request.URL.Path, "/"), "/")
@@ -123,7 +118,7 @@ func (server *MediaMTXServer) startRPC() error {
 }
 
 func (server *MediaMTXServer) closeRPC() error {
-	ctx, cancel := context.WithTimeout(context.Background(), server.shutdownTimeout())
+	ctx, cancel := context.WithTimeout(context.Background(), server.config.ShutdownTimeout)
 	defer cancel()
 	err := server.rpcHost.Shutdown(ctx)
 	select {

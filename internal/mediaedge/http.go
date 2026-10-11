@@ -51,10 +51,7 @@ func newHTTPServer(server httpBackend) *httpServer {
 }
 
 func (server *httpServer) start(listener net.Listener) error {
-	options, err := server.server.HTTPConfig().hostOptions(false)
-	if err != nil {
-		return err
-	}
+	options := server.server.HTTPConfig().hostOptions(false)
 	server.options = options
 	host, err := httpx.ServeEdge(listener, http.HandlerFunc(server.route), options)
 	if err != nil {

@@ -127,11 +127,6 @@ func main() {
 			URLs: append([]string(nil), iceURLs...), Username: strings.TrimSpace(*iceUsername), Credential: *iceCredential,
 		}}
 	}
-	// This is the sole environment snapshot for all shared XRPC owners.
-	config.RuntimePolicy, err = mediaedge.ResolveRuntimePolicy(os.Environ(), config)
-	if err != nil {
-		log.Fatalf("invalid XGC media-edge XRPC startup policy: %v", err)
-	}
 	server, err := mediaedge.NewMediaMTX(config, mediaedge.MediaMTXSettings{
 		Executable: *mediaMTXExecutable, RuntimeDir: *mediaMTXRuntimeDir,
 		APIAddress: *mediaMTXAPIAddress, WHEPAddress: *mediaMTXWHEPAddress,

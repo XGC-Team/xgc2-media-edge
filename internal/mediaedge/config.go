@@ -6,7 +6,7 @@ package mediaedge
 import (
 	"errors"
 	"fmt"
-	"github.com/XGC-Team/xgc2-xrpc/go"
+	"github.com/XGC-Team/xgc2-xrpc/go/httpx"
 	"math"
 	"net"
 	"net/url"
@@ -61,7 +61,18 @@ type Config struct {
 	MaxOperations            int
 	MaxCaptureBytes          int64
 	MaxRetainedSnapshotBytes int64
-	RuntimePolicy            *xrpc.Policy
+	// Transport limits select media-edge's defaults when zero. The hosts and
+	// source clients share the byte and time limits.
+	HostMaxConnections   int
+	HostMaxInFlight      int
+	ClientMaxConnections int
+	MaxHeaderBytes       int
+	MaxRequestBytes      int64
+	MaxResponseBytes     int64
+	CallTimeout          time.Duration
+	HeaderTimeout        time.Duration
+	IdleTimeout          time.Duration
+	ShutdownTimeout      time.Duration
 	// PipelineTemplatesDir holds the pipeline templates and PipelineRuntimeDir
 	// the per-source scratch directories of pipeline sources. Both are
 	// required, as canonical absolute paths, when a pipeline source is
@@ -226,6 +237,20 @@ func (config Config) normalized() (Config, error) {
 	}
 	config.AllowedOrigins = origins
 	return config, nil
+}
+
+func (config Config) hostOptions(private bool) httpx.HostOptions {
+	options := httpx.HostOptions{
+		MaxConnections: config.HostMaxConnections, MaxInFlight: config.HostMaxInFlight,
+		MaxBodyBytes: config.MaxRequestBytes, MaxResponseBytes: config.MaxResponseBytes,
+		MaxHeaderBytes: config.MaxHeaderBytes, HeaderTimeout: config.HeaderTimeout,
+		MaxCallTime: config.CallTimeout, WriteTimeout: 20 * time.Second,
+		IdleTimeout: config.IdleTimeout, ShutdownTimeout: config.ShutdownTimeout,
+	}
+	if private {
+		options.WriteTimeout = options.MaxCallTime
+	}
+	return options
 }
 
 func (config RecordingConfig) enabled() bool {
