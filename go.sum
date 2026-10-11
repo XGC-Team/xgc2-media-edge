@@ -1,5 +1,5 @@
-github.com/XGC-Team/xgc2-xrpc/go v0.0.0-20261011013206-d33afa88c426 h1:is5nfDWJ1gmrlEEBxJRw7zT/ogh0f96jJyqdcbLJ7/8=
-github.com/XGC-Team/xgc2-xrpc/go v0.0.0-20261011013206-d33afa88c426/go.mod h1:GvSetpAh9ef+bjbYoo9avS25fMASCJ76eK3RrrAuXbM=
+github.com/XGC-Team/xgc2-xrpc/go v0.0.0-20261011052114-ec2953aac4d5 h1:T0IDXr8q6HfoITYUK9MNM1PgrDN0FSdnIUashjgRRH4=
+github.com/XGC-Team/xgc2-xrpc/go v0.0.0-20261011052114-ec2953aac4d5/go.mod h1:GvSetpAh9ef+bjbYoo9avS25fMASCJ76eK3RrrAuXbM=
 golang.org/x/net v0.46.1-0.20251013234738-63d1a5100f82 h1:6/3JGEh1C88g7m+qzzTbl3A0FtsLguXieqofVLU/JAo=
 golang.org/x/net v0.46.1-0.20251013234738-63d1a5100f82/go.mod h1:Q9BGdFy1y4nkUwiLvT5qtyhAnEHgnQ/zd8PfU6nc210=
 golang.org/x/sys v0.37.0 h1:fdNQudmxPjkdUTPnLn5mdQv7Zwvbvpaxqs831goi9kQ=
