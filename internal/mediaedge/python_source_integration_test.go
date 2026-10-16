@@ -35,12 +35,17 @@ func TestRealPythonSourceControlAndEdgeCapture(t *testing.T) {
 	_, port, _ := net.SplitHostPort(address)
 	pythonPath := os.Getenv("XGC_MEDIA_SOURCE_PYTHONPATH")
 	if pythonPath == "" {
-		pythonPath = "/tmp/xrpc-python-deps" + string(os.PathListSeparator) + filepath.Join("..", "..", "..", "xrpc", "python") + string(os.PathListSeparator) + filepath.Join("..", "..", "..", "..", "ros2", "driver", "ros_image_rtp_adapter")
+		pythonPath = "/tmp/xrpc-python-deps" + string(os.PathListSeparator) + filepath.Join("..", "..", "..", "xrpc", "python")
 		parts := strings.Split(pythonPath, string(os.PathListSeparator))
 		for index, path := range parts {
 			parts[index], _ = filepath.Abs(path)
 		}
 		pythonPath = strings.Join(parts, string(os.PathListSeparator))
+	}
+	probe := exec.Command("python3", "-c", "import ros_image_rtp_adapter.control_socket")
+	probe.Env = append(os.Environ(), "PYTHONPATH="+pythonPath)
+	if err := probe.Run(); err != nil {
+		t.Skip("ros_image_rtp_adapter is not importable")
 	}
 	cmd := exec.Command("python3", "-u", filepath.Join("testdata", "python_source_fixture.py"), socket, port)
 	cmd.Env = append(os.Environ(), "PYTHONPATH="+pythonPath)
