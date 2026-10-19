@@ -1193,11 +1193,14 @@ func (server *MediaMTXServer) CaptureSnapshot(
 	source.capturePending = true
 	source.mu.Unlock()
 	defer func() { source.mu.Lock(); source.capturePending = false; source.mu.Unlock() }()
-	if err := source.acquire(operationContext); err != nil {
-		return Snapshot{}, fmt.Errorf("activate media source %q: %w", sourceID, err)
+	// Native cameras render snapshots on demand. A JPEG capture without
+	// a keyframe request does not need to activate the H264 live encoder.
+	if source.config.Kind == SourceKindPipeline || request.requestKeyframe() {
+		if err := source.acquire(operationContext); err != nil {
+			return Snapshot{}, fmt.Errorf("activate media source %q: %w", sourceID, err)
+		}
+		defer source.releasePending("")
 	}
-	defer source.releasePending("")
-	metadata := source.sourceConfig()
 	id, err := newSnapshotID()
 	if err != nil {
 		return Snapshot{}, err
@@ -1209,6 +1212,8 @@ func (server *MediaMTXServer) CaptureSnapshot(
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("capture source snapshot: %w", err)
 	}
+	// Discovery completes inside the first call, so read the geometry after it.
+	metadata := source.sourceConfig()
 	if response.SourceID != source.config.ID || response.SnapshotID != id || response.Sequence == 0 {
 		return Snapshot{}, errors.New("capture source returned a mismatched snapshot ID")
 	}
