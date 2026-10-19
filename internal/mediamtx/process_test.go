@@ -76,6 +76,7 @@ if [ "$1" = "--version" ]; then
   echo v1.20.0
   exit 0
 fi
+echo "ERR unable to set read buffer size to 8388608"
 exit 7
 `)
 	process, err := NewProcess(ProcessConfig{
@@ -86,8 +87,40 @@ exit 7
 	if err != nil {
 		t.Fatalf("create process: %v", err)
 	}
-	if err := process.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "exited before readiness") {
+	if err := process.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "exited before readiness") ||
+		!strings.Contains(err.Error(), "unable to set read buffer size") {
 		t.Fatalf("early exit error = %v", err)
+	}
+	_ = process.Close()
+}
+
+// A grandchild that inherits stdout keeps the log pipe open after MediaMTX
+// exits. Wait must not block on it, or the startup error would never surface.
+func TestProcessExitIsNotBlockedByLingeringStdoutHolder(t *testing.T) {
+	executable := writeProcessFixture(t, `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo v1.20.0
+  exit 0
+fi
+sleep 5 &
+echo "ERR rejected socket option"
+exit 7
+`)
+	process, err := NewProcess(ProcessConfig{
+		Executable: executable, RuntimeDir: t.TempDir(), Configuration: []byte(`{}`),
+		Readiness:      func(context.Context) error { return errors.New("not ready") },
+		StartupTimeout: 4 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("create process: %v", err)
+	}
+	started := time.Now()
+	err = process.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "exited before readiness") || !strings.Contains(err.Error(), "rejected socket option") {
+		t.Fatalf("early exit error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("exit surfaced after %v, want the short wait delay", elapsed)
 	}
 	_ = process.Close()
 }

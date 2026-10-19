@@ -35,6 +35,7 @@ type ProcessConfig struct {
 // would detach failures from Experiment lifecycle truth.
 type Process struct {
 	config ProcessConfig
+	tail   *tailWriter
 
 	mu         sync.Mutex
 	command    *exec.Cmd
@@ -72,7 +73,10 @@ func NewProcess(config ProcessConfig) (*Process, error) {
 	if config.Stderr == nil {
 		config.Stderr = os.Stderr
 	}
-	return &Process{config: config, done: make(chan struct{})}, nil
+	// MediaMTX logs to stdout, which the wrapper's own failure text never carried.
+	tail := &tailWriter{}
+	config.Stdout = io.MultiWriter(config.Stdout, tail)
+	return &Process{config: config, tail: tail, done: make(chan struct{})}, nil
 }
 
 func (process *Process) Start(ctx context.Context) error {
@@ -110,6 +114,9 @@ func (process *Process) Start(ctx context.Context) error {
 	command.Dir = process.config.RuntimeDir
 	command.Stdout = process.config.Stdout
 	command.Stderr = process.config.Stderr
+	// The stdout tail makes Stdout a non-file writer, so Wait also waits for a
+	// copier goroutine. Bound that wait so a pipe holder cannot block it.
+	command.WaitDelay = time.Second
 	if err := command.Start(); err != nil {
 		_ = os.Remove(configPath)
 		return fmt.Errorf("start MediaMTX: %w", err)
@@ -138,7 +145,7 @@ func (process *Process) Start(ctx context.Context) error {
 		}
 		select {
 		case <-process.done:
-			return fmt.Errorf("MediaMTX exited before readiness: %w", process.exitError())
+			return fmt.Errorf("MediaMTX exited before readiness: %w: %s", process.exitError(), process.tail.String())
 		case <-startupContext.Done():
 			_ = process.Close()
 			if lastProbeErr != nil {
@@ -245,4 +252,27 @@ func writeConfiguration(runtimeDir string, content []byte) (string, error) {
 		return "", fmt.Errorf("publish MediaMTX configuration: %w", err)
 	}
 	return finalPath, nil
+}
+
+// tailWriter keeps the last few KiB of MediaMTX's log so that a startup exit
+// reports MediaMTX's own reason (for example a rejected UDP receive buffer).
+type tailWriter struct {
+	mu   sync.Mutex
+	data []byte
+}
+
+func (writer *tailWriter) Write(data []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	writer.data = append(writer.data, data...)
+	if extra := len(writer.data) - 2048; extra > 0 {
+		writer.data = writer.data[extra:]
+	}
+	return len(data), nil
+}
+
+func (writer *tailWriter) String() string {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return strings.TrimSpace(string(writer.data))
 }
