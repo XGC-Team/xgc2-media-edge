@@ -254,11 +254,11 @@ func TestCameraPeerCaptureRecoversAfterSocketReplacement(t *testing.T) {
 		t.Fatal("down source blocked capture")
 	}
 	startRestartingCamera(t, socket, address, "capture-second")
-	eventually(t, 3*time.Second, func() bool {
-		return edge.SourceStatuses()[0].ControlInstanceID == "capture-second" && edge.SourceStatuses()[0].ControlHealthy
-	})
 	if snapshot, err := edge.CaptureSnapshot(t.Context(), "camera", SnapshotCaptureRequest{}); err != nil || len(snapshot.RGB) != 16*16*3 {
 		t.Fatalf("replacement capture: RGB=%d err=%v", len(snapshot.RGB), err)
+	}
+	if status := edge.SourceStatuses()[0]; status.ControlInstanceID != "capture-second" || !status.ControlHealthy {
+		t.Fatalf("requested capture did not observe replacement: %+v", status)
 	}
 }
 

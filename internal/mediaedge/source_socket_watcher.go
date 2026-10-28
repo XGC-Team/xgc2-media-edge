@@ -112,7 +112,7 @@ func (watcher *sourceSocketWatcher) run() {
 			}
 			watcher.mu.Unlock()
 			for _, peer := range affected {
-				peer.invalidate()
+				peer.invalidate(true)
 			}
 			offset = end
 		}

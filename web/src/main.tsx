@@ -59,6 +59,9 @@ function App() {
   const mountedRef = useRef(false)
   const pageActiveRef = useRef(true)
   const inFlightRef = useRef(false)
+  const flightGenerationRef = useRef(0)
+  const resumeAfterJoinRef = useRef(false)
+  const retiringRef = useRef<Promise<void> | null>(null)
   const connectRef = useRef<(() => Promise<void>) | null>(null)
   const [skin, setSkin] = useSkin(skinOptions)
   const [sessionState, setSessionState] = useState<SessionState>('starting')
@@ -66,6 +69,23 @@ function App() {
   const [message, setMessage] = useState('Negotiating a direct WebRTC session…')
   const [connecting, setConnecting] = useState(true)
   const [appearanceError, setAppearanceError] = useState('')
+
+  const retireRemote = useCallback((sessionId: string) => {
+    const previous = retiringRef.current
+    const close = fetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+      credentials: 'omit',
+      keepalive: true,
+    }).then(response => {
+      if (!response.ok) throw new Error(`session cleanup failed (${response.status})`)
+    })
+    const retirement = previous ? Promise.all([previous, close]).then(() => undefined) : close
+    retiringRef.current = retirement
+    void retirement.then(() => {
+      if (retiringRef.current === retirement) retiringRef.current = null
+    }, () => undefined)
+    return retirement
+  }, [])
 
   const closeSession = useCallback(() => {
     if (retryRef.current !== null) window.clearTimeout(retryRef.current)
@@ -77,13 +97,14 @@ function App() {
     sessionIdRef.current = ''
     if (videoRef.current) videoRef.current.srcObject = null
     peer?.close()
-    if (sessionId) {
-      void fetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, {
-        method: 'DELETE',
-        credentials: 'omit',
-        keepalive: true,
-      })
-    }
+    return sessionId ? retireRemote(sessionId) : retiringRef.current
+  }, [retireRemote])
+
+  const finishFlight = useCallback(() => {
+    inFlightRef.current = false
+    if (!resumeAfterJoinRef.current) return
+    resumeAfterJoinRef.current = false
+    if (mountedRef.current && pageActiveRef.current && !document.hidden) void connectRef.current?.()
   }, [])
 
   const scheduleRetry = useCallback(() => {
@@ -99,16 +120,36 @@ function App() {
   const connect = useCallback(async () => {
     if (!mountedRef.current || !pageActiveRef.current || document.hidden) return
     if (inFlightRef.current) {
-      scheduleRetry()
+      if (flightGenerationRef.current !== generationRef.current) resumeAfterJoinRef.current = true
       return
     }
     inFlightRef.current = true
-    closeSession()
+    const retirement = closeSession()
     const currentGeneration = generationRef.current
+    flightGenerationRef.current = currentGeneration
     setConnecting(true)
     setSessionState('starting')
     setStateLabel('Connecting')
     setMessage('Negotiating a direct WebRTC session…')
+
+    if (retirement) {
+      try {
+        await retirement
+      } catch (cause) {
+        if (currentGeneration === generationRef.current) {
+          setConnecting(false)
+          setSessionState('error')
+          setStateLabel('Unavailable')
+          setMessage(cause instanceof Error ? cause.message : 'The previous camera session could not be closed.')
+        }
+        finishFlight()
+        return
+      }
+    }
+    if (currentGeneration !== generationRef.current || !mountedRef.current || !pageActiveRef.current || document.hidden) {
+      finishFlight()
+      return
+    }
 
     const connection = new RTCPeerConnection()
     peerRef.current = connection
@@ -166,11 +207,7 @@ function App() {
       const answer = await response.json() as SessionAnswer
       if (!response.ok) throw new Error(answer.error || `session request failed (${response.status})`)
       if (currentGeneration !== generationRef.current) {
-        void fetch(`/api/v1/sessions/${encodeURIComponent(answer.sessionId)}`, {
-          method: 'DELETE',
-          credentials: 'omit',
-          keepalive: true,
-        })
+        await retireRemote(answer.sessionId)
         return
       }
       sessionIdRef.current = answer.sessionId
@@ -184,9 +221,9 @@ function App() {
       setMessage(cause instanceof Error ? cause.message : 'Unable to open the video session.')
       scheduleRetry()
     } finally {
-      inFlightRef.current = false
+      finishFlight()
     }
-  }, [closeSession, scheduleRetry, sourceId])
+  }, [closeSession, finishFlight, retireRemote, scheduleRetry, sourceId])
 
   useEffect(() => {
     mountedRef.current = true

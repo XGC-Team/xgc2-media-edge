@@ -84,6 +84,7 @@ type MediaMTXServer struct {
 	activeOperations  int
 	pendingSessions   int
 	cleanupCursor     int
+	reconcileCond     *sync.Cond
 	closeMu           sync.Mutex
 	closeComplete     bool
 	started           bool
@@ -308,6 +309,7 @@ func newMediaMTXServer(
 		lifecycleContext: lifecycleContext, cancelLifecycle: cancelLifecycle,
 		closed: make(chan struct{}),
 	}
+	server.reconcileCond = sync.NewCond(&server.mu)
 	for _, source := range config.Sources {
 		server.sources[source.ID] = &mediaMTXSource{
 			server: server, config: source, sessions: make(map[string]struct{}),
@@ -378,6 +380,14 @@ func (server *MediaMTXServer) Start() (startErr error) {
 		}
 		source.config = described
 		source.controlHealthy = true
+		// Pipeline status is local. Seed its idle snapshot once, without
+		// keeping a background status or MediaMTX inventory poll alive.
+		status, _, _, err := source.controller().call(server.lifecycleContext, sourceControlRequest{Operation: "status"})
+		if err != nil {
+			return fmt.Errorf("read media source %q status: %w", source.config.ID, err)
+		}
+		source.nativeStatus = status
+		source.controlObservedAt = time.Now().UTC()
 		for index := range server.config.Sources {
 			if server.config.Sources[index].ID == sourceID {
 				server.config.Sources[index] = described
@@ -543,7 +553,6 @@ func (server *MediaMTXServer) OpenSession(
 			source.releasePending("")
 		}
 	}()
-	source.requestKeyframeAsync(true)
 	if err := server.waitForMediaMTXPath(operationContext, sourceID); err != nil {
 		return SessionAnswer{}, fmt.Errorf("activate media source %q: %w", sourceID, err)
 	}
@@ -559,6 +568,7 @@ func (server *MediaMTXServer) OpenSession(
 		return SessionAnswer{}, errors.New("media edge is closing")
 	}
 	server.sessions[sessionID] = item
+	server.reconcileCond.Signal()
 	server.pendingSessions--
 	reserved = false
 	server.mu.Unlock()
@@ -587,9 +597,8 @@ func (server *MediaMTXServer) OpenSession(
 		_ = server.closeSession(item, true)
 		return SessionAnswer{}, errors.New("media edge is closing")
 	}
-	// A short GOP already guarantees bounded startup. This request accelerates
-	// first paint; reconcile sends one more after ICE is actually established.
-	source.requestKeyframeAsync(true)
+	// Reconciliation requests a native keyframe only after this peer's ICE is
+	// established; requests before that peer can receive frames are redundant.
 	metadata := source.sourceConfig()
 	return SessionAnswer{
 		SessionID: sessionID, SDP: upstream.AnswerSDP, DataChannelLabel: ControlDataChannelLabel,
@@ -735,9 +744,10 @@ func (source *mediaMTXSource) acquire(ctx context.Context) error {
 		}
 	}
 	source.mu.Unlock()
-	if _, _, _, err := source.controller().call(ctx, sourceControlRequest{
+	response, _, _, err := source.controller().call(ctx, sourceControlRequest{
 		Operation: "start",
-	}); err != nil {
+	})
+	if err != nil {
 		source.mu.Lock()
 		source.pending--
 		source.active = true // a lost reply can follow applied activation
@@ -752,6 +762,11 @@ func (source *mediaMTXSource) acquire(ctx context.Context) error {
 	source.mu.Lock()
 	source.active = true
 	source.deactivateUncertain = false
+	if source.config.Kind == SourceKindPipeline {
+		response.DesiredActive, response.AppliedActive = true, true
+		source.nativeStatus = response
+		source.controlObservedAt = time.Now().UTC()
+	}
 	source.activeSince = time.Now()
 	source.lastRecoveryAttemptAt = time.Time{}
 	source.mu.Unlock()
@@ -769,7 +784,7 @@ func (source *mediaMTXSource) releasePending(sessionID string) {
 	unused := !source.hasConsumersLocked() && source.active
 	source.mu.Unlock()
 	if unused {
-		source.scheduleDeactivate()
+		source.deactivateUnusedNow()
 	}
 }
 
@@ -779,7 +794,7 @@ func (source *mediaMTXSource) removeSession(sessionID string) {
 	empty := !source.hasConsumersLocked()
 	source.mu.Unlock()
 	if empty {
-		source.scheduleDeactivate()
+		source.deactivateUnusedNow()
 	}
 }
 
@@ -820,6 +835,24 @@ func (source *mediaMTXSource) scheduleDeactivate() {
 	source.mu.Unlock()
 }
 
+// Confirmed release ends optional source demand immediately. The lifecycle
+// mutex and epoch fence a simultaneous reveal; a real cleanup failure keeps
+// the existing retry owner rather than inventing a second lease.
+func (source *mediaMTXSource) deactivateUnusedNow() {
+	if source.server.isClosing() {
+		return
+	}
+	source.mu.Lock()
+	if !source.active || source.hasConsumersLocked() {
+		source.mu.Unlock()
+		return
+	}
+	source.cancelDeactivateTimerLocked()
+	epoch := source.deactivateEpoch
+	source.mu.Unlock()
+	source.server.startBackground(func() { source.deactivateIfUnused(epoch) })
+}
+
 func (source *mediaMTXSource) deactivateIfUnused(epoch uint64) {
 	source.lifecycleMu.Lock()
 	defer source.lifecycleMu.Unlock()
@@ -835,7 +868,7 @@ func (source *mediaMTXSource) deactivateIfUnused(epoch uint64) {
 	source.mu.Unlock()
 	ctx, cancel := context.WithTimeout(source.server.lifecycleContext, sourceControlRequestTimeout)
 	defer cancel()
-	_, _, _, err := source.controller().call(ctx, sourceControlRequest{
+	response, _, _, err := source.controller().call(ctx, sourceControlRequest{
 		Operation: "stop",
 	})
 	source.mu.Lock()
@@ -860,6 +893,14 @@ func (source *mediaMTXSource) deactivateIfUnused(epoch uint64) {
 	}
 	source.active = false
 	source.deactivateUncertain = false
+	// Stop was confirmed by the source owner. A previously observed MediaMTX
+	// path is no longer the current live status of this released lease.
+	source.available, source.online = false, false
+	if source.config.Kind == SourceKindPipeline {
+		response.DesiredActive, response.AppliedActive = false, false
+		source.nativeStatus = response
+		source.controlObservedAt = time.Now().UTC()
+	}
 	source.activeSince = time.Time{}
 	source.lastRecoveryAttemptAt = time.Time{}
 }
@@ -889,14 +930,33 @@ func (source *mediaMTXSource) requestKeyframeAsync(force bool) {
 	}
 }
 
+// A managed pipeline implements keyframe requests by restarting capture and
+// the encoder. Viewer admission must not interrupt a shared live source; the
+// shipped pipelines already emit periodic IDRs. External camera sources can
+// still issue their native, non-restart keyframe request for a new peer.
+func (source *mediaMTXSource) requestViewerKeyframeAsync() {
+	if source.config.Kind != SourceKindPipeline {
+		source.requestKeyframeAsync(true)
+	}
+}
+
 func (server *MediaMTXServer) reconcileLoop() {
-	ticker := time.NewTicker(mediaMTXReconcileInterval)
-	defer ticker.Stop()
 	for {
+		server.mu.Lock()
+		for !server.closing && len(server.sessions) == 0 && len(server.recordings) == 0 {
+			server.reconcileCond.Wait()
+		}
+		closing := server.closing
+		server.mu.Unlock()
+		if closing {
+			return
+		}
+		server.reconcile()
+		timer := time.NewTimer(mediaMTXReconcileInterval)
 		select {
-		case <-ticker.C:
-			server.reconcile()
+		case <-timer.C:
 		case <-server.closed:
+			timer.Stop()
 			return
 		}
 	}
@@ -1008,7 +1068,7 @@ func (server *MediaMTXServer) reconcile() {
 			session.keyframeAfterICE = true
 			session.mu.Unlock()
 			if request {
-				session.source.requestKeyframeAsync(true)
+				session.source.requestViewerKeyframeAsync()
 			}
 		}
 	}
@@ -1024,8 +1084,10 @@ func (source *mediaMTXSource) observePath(now time.Time, status mtx.PathStatus) 
 	}
 	source.inboundBytes = status.InboundBytes
 	source.framesInError = status.InboundFramesInError
-	source.available = status.Available && (source.config.Kind == SourceKindPipeline || source.controlHealthy)
-	source.online = status.Online && (source.config.Kind == SourceKindPipeline || source.controlHealthy)
+	// An inventory call can finish after a confirmed stop. Its path sample
+	// must not resurrect the retired lease's availability or online flags.
+	source.available = source.active && status.Available && (source.config.Kind == SourceKindPipeline || source.controlHealthy)
+	source.online = source.active && status.Online && (source.config.Kind == SourceKindPipeline || source.controlHealthy)
 	recordingID := source.recordingID
 	lastActivity := source.lastPacketAt
 	if lastActivity.Before(source.activeSince) {
@@ -1133,17 +1195,23 @@ func (source *mediaMTXSource) pollStatusAsync() {
 		return
 	}
 	source.mu.Lock()
-	if source.statusPending {
+	if source.statusPending || !source.active || !source.hasConsumersLocked() {
 		source.mu.Unlock()
 		return
 	}
 	source.statusPending = true
+	epoch := source.deactivateEpoch
 	source.mu.Unlock()
 	if !source.server.startBackground(func() {
 		response, _, _, err := source.controller().call(source.server.lifecycleContext, sourceControlRequest{Operation: "status"})
 		source.mu.Lock()
 		defer source.mu.Unlock()
 		source.statusPending = false
+		// A status flight belongs to the demand that started it. A park or a
+		// newer reveal must not publish its now-stale result.
+		if epoch != source.deactivateEpoch || !source.active || !source.hasConsumersLocked() {
+			return
+		}
 		source.controlObservedAt = time.Now().UTC()
 		if err != nil {
 			source.controlHealthy = false
@@ -1426,6 +1494,7 @@ func (server *MediaMTXServer) Close() error {
 	server.stopOnce.Do(func() {
 		server.mu.Lock()
 		server.closing = true
+		server.reconcileCond.Broadcast()
 		server.cancelLifecycle()
 		server.mu.Unlock()
 		close(server.closed)

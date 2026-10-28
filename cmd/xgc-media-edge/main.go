@@ -53,7 +53,7 @@ func main() {
 		iceURLs                  multiString
 		iceUsername              = flag.String("ice-username", "", "optional shared TURN username")
 		iceCredential            = flag.String("ice-credential", "", "optional shared TURN credential")
-		grace                    = flag.Duration("session-grace", 10*time.Second, "idle source stop delay")
+		grace                    = flag.Duration("session-grace", 10*time.Second, "cleanup delay after an ambiguous failed source activation")
 		snapshotTTL              = flag.Duration("snapshot-ttl", 15*time.Second, "immutable snapshot retention")
 		recordingEnabled         = flag.Bool("recording-enabled", false, "enable local stream-copy recording with an explicit root and peak bitrate")
 		recordingRoot            = flag.String("recording-root", "", "absolute local recording root; empty disables recording")

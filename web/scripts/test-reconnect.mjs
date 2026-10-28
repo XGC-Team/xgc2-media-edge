@@ -19,6 +19,11 @@ const state = []
 const effects = []
 const cleanups = []
 const pending = new Map()
+let holdDelete = false
+let finishDelete
+let failDelete = false
+let holdPost = false
+let finishPost
 const originalRandom = Math.random
 Math.random = () => {
   seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
@@ -41,10 +46,15 @@ globalThis.window = {
   removeEventListener: name => windowEvents.delete(name),
 }
 globalThis.fetch = async (path, options) => {
-  if (options.method === 'DELETE') { pending.delete(path.split('/').at(-1)); return { ok: true } }
+  if (options.method === 'DELETE') {
+    if (holdDelete) await new Promise(resolve => { finishDelete = resolve })
+    if (failDelete) return { ok: false, status: 502 }
+    pending.delete(path.split('/').at(-1)); return { ok: true }
+  }
   attempts += 1
   inFlight += 1
   maxInFlight = Math.max(maxInFlight, inFlight)
+  if (holdPost) await new Promise(resolve => { finishPost = resolve })
   await new Promise(resolve => setTimeout(resolve, 2))
   inFlight -= 1
   if (!ready) return { ok: false, status: 503, json: async () => ({ error: 'camera source is unavailable' }) }
@@ -136,6 +146,53 @@ try {
   while (state[0] !== 'connected' && Date.now() < resumed) await sleep(10)
   assert.equal(state[0], 'connected')
   assert.equal(pending.size, 1)
+  holdDelete = true
+  document.hidden = true
+  documentEvents.get('visibilitychange')()
+  await sleep(10)
+  assert.equal(pending.size, 1)
+  assert.equal(typeof finishDelete, 'function')
+  const beforeReveal = attempts
+  document.hidden = false
+  documentEvents.get('visibilitychange')()
+  await sleep(30)
+  assert.equal(attempts, beforeReveal, 'reveal issued a new offer before the retired peer joined')
+  assert.equal(pending.size, 1)
+  holdDelete = false
+  finishDelete()
+  const joined = Date.now() + 2_000
+  while (attempts === beforeReveal && Date.now() < joined) await sleep(10)
+  while (pending.size !== 1 && Date.now() < joined) await sleep(10)
+  assert.equal(attempts, beforeReveal + 1)
+  assert.equal(pending.size, 1)
+  console.log('Rapid reveal: zero overlapping offers; one current offer after exact DELETE joins')
+
+  document.hidden = true
+  documentEvents.get('visibilitychange')()
+  await sleep(10)
+  assert.equal(pending.size, 0)
+  holdPost = true
+  document.hidden = false
+  documentEvents.get('visibilitychange')()
+  const postStarted = Date.now() + 2_000
+  while (!finishPost && Date.now() < postStarted) await sleep(2)
+  assert.equal(typeof finishPost, 'function')
+  const beforeLate = attempts
+  document.hidden = true
+  documentEvents.get('visibilitychange')()
+  document.hidden = false
+  documentEvents.get('visibilitychange')()
+  await sleep(30)
+  assert.equal(attempts, beforeLate, 'reveal overlapped an unjoined POST')
+  holdPost = false
+  finishPost()
+  const lateJoined = Date.now() + 2_000
+  while (attempts === beforeLate && Date.now() < lateJoined) await sleep(10)
+  while (pending.size !== 1 && Date.now() < lateJoined) await sleep(10)
+  assert.equal(attempts, beforeLate + 1)
+  assert.equal(pending.size, 1)
+  console.log('Late admitted POST: exact retired session joined before one current offer')
+
   windowEvents.get('pagehide')()
   await sleep(20)
   assert.equal(pending.size, 0)
@@ -143,6 +200,20 @@ try {
   const shown = Date.now() + 2_000
   while (pending.size !== 1 && Date.now() < shown) await sleep(10)
   assert.equal(pending.size, 1)
+  failDelete = true
+  document.hidden = true
+  documentEvents.get('visibilitychange')()
+  await sleep(10)
+  const beforeFailure = attempts
+  document.hidden = false
+  documentEvents.get('visibilitychange')()
+  await sleep(30)
+  assert.equal(attempts, beforeFailure, 'unconfirmed cleanup caused a blind new offer')
+  assert.equal(state[0], 'error')
+  assert.equal(state[1], 'Unavailable')
+  assert.match(state[2], /session cleanup failed/)
+  assert.equal(timers.size, 0)
+  pending.clear() // the fixture ends with an explicitly unconfirmed remote owner
 } finally {
   for (const cleanup of cleanups) cleanup?.()
   Math.random = originalRandom

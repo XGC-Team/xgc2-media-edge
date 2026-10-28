@@ -20,7 +20,7 @@
     },
     {
       "path": "web/src/main.tsx",
-      "sha256": "9fd69868ebdb425723d2d3e654e1fcb6df7b32274f73d7fcba36aa2b2d43bf4d"
+      "sha256": "d763d79cf6d3c1d9bdc16edfc0988a524df0d59c78ea83264eb89237298d27f9"
     },
     {
       "path": "web/src/styles.css",
@@ -72,7 +72,7 @@
     },
     {
       "path": "internal/mediaedge/player/player.js",
-      "sha256": "47e86656518b546b51eab16426a6be5fd6ee16af3e5ecbbf8f5ce0f5eac0fddf"
+      "sha256": "ebb073c4f285576f9470b09824af4ae6c492f034af3b3f67be8a1fd0d96085f3"
     }
   ]
 }

@@ -202,6 +202,7 @@ func (server *MediaMTXServer) StartRecording(
 		return RecordingManifest{}, errors.New("media edge is closing")
 	}
 	server.recordings[recordingID] = item
+	server.reconcileCond.Signal()
 	server.mu.Unlock()
 	source.mu.Lock()
 	if source.pending > 0 {
@@ -344,7 +345,7 @@ func (item *mediaMTXRecording) finalize() {
 	item.source.mu.Unlock()
 	item.source.recordingLifecycleMu.Unlock()
 	if unused {
-		item.source.scheduleDeactivate()
+		item.source.deactivateUnusedNow()
 	}
 	manifest := item.status()
 	item.server.mu.Lock()

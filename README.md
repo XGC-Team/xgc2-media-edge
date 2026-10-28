@@ -239,9 +239,9 @@ A source normally is a process of its own that implements the camera-source
 contract. Where there is none, the edge runs the encoder: a source with
 `"kind": "pipeline"` names a template and its parameters. The edge starts the
 pipeline when the first viewer, capture or recording needs the source and stops it
-after `--session-grace` without consumers, so a camera device is open only while
-it is watched. The pipeline sends H264/RTP to the source's `rtpListenAddress`
-like any other source.
+when the last confirmed demand leaves. `--session-grace` remains the cleanup
+delay for an ambiguous failed activation. The pipeline sends H264/RTP to the
+source's `rtpListenAddress` like any other source.
 
 ```json
 {
@@ -359,7 +359,8 @@ A pipeline source presents the camera-source contract to the rest of the edge:
 - `request-keyframe` restarts the pipeline, whose stream begins with an IDR
   (`keyframePolicy: "restart"`). A request within five seconds of the start is
   coalesced, since the stream began with one and the template repeats one every
-  second.
+  second. Viewer admission does not make this destructive request: existing
+  viewers keep their source, and shipped templates provide periodic IDRs.
 - `capture` needs the snapshot branch: one JPEG per second written to the
   scratch directory, two files kept. It returns the newest complete file as JPEG
   and, unless `includeRgb` is false, as decoded RGB8. With `requireFresh` it waits

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"sync"
 	"time"
 
@@ -27,6 +28,7 @@ type cameraPeer struct {
 
 	connected       bool
 	invalidated     bool
+	socketChanged   bool
 	cancelAttempt   context.CancelFunc
 	desiredActive   bool
 	desiredRevision uint64
@@ -37,6 +39,9 @@ type cameraPeer struct {
 	receipt         sourceControlResponse
 	lastError       error
 	attempts        uint64
+	callers         int
+	idle            bool
+	validatingStop  bool
 	rng             *rand.Rand
 }
 
@@ -71,10 +76,11 @@ func (peer *cameraPeer) notifyLocked() {
 
 // A socket event or failed fenced call retires the old transport. Notifications
 // coalesce; the worker alone discovers, validates and applies the next lease.
-func (peer *cameraPeer) invalidate() {
+func (peer *cameraPeer) invalidate(socketChanged bool) {
 	peer.mu.Lock()
 	peer.connected = false
 	peer.invalidated = true
+	peer.socketChanged = peer.socketChanged || socketChanged
 	if peer.cancelAttempt != nil {
 		peer.cancelAttempt()
 	}
@@ -87,22 +93,85 @@ func (peer *cameraPeer) invalidate() {
 func (peer *cameraPeer) boundInstance() string { return peer.control.boundInstance() }
 
 func (peer *cameraPeer) boundReference() (xrpc.ServiceRef, bool) {
-	peer.start()
-	select {
-	case <-peer.first:
-	case <-time.After(sourceControlRequestTimeout):
-		return xrpc.ServiceRef{}, false
-	}
-	peer.mu.Lock()
-	connected := peer.connected
-	peer.mu.Unlock()
-	if !connected {
+	idle, attempts, _ := peer.beginDemand(nil)
+	defer peer.endDemand()
+	ctx, cancel := context.WithTimeout(context.Background(), sourceControlRequestTimeout)
+	defer cancel()
+	if peer.awaitConnection(ctx, idle, attempts) != nil {
 		return xrpc.ServiceRef{}, false
 	}
 	return peer.control.boundReference()
 }
 
 func (peer *cameraPeer) close() { peer.control.close() }
+
+func (peer *cameraPeer) beginDemand(request *sourceControlRequest) (bool, uint64, uint64) {
+	peer.mu.Lock()
+	// Capture quiescence before changing the lease. A reveal which arrives
+	// before the worker has parked still joins one current discovery flight.
+	idle := peer.idle || (!peer.connected && !peer.desiredActive && peer.callers == 0 && peer.desiredRevision == peer.appliedRevision)
+	attempts := peer.attempts + 1
+	if peer.cancelAttempt != nil && !peer.invalidated {
+		attempts = peer.attempts
+	}
+	if request != nil {
+		lease := request.Operation == "start" || request.Operation == "stop"
+		if lease && (peer.desiredRevision == 0 || peer.desiredActive != (request.Operation == "start")) {
+			peer.desiredRevision++
+			peer.desiredActive = request.Operation == "start"
+		}
+	}
+	revision := peer.desiredRevision
+	peer.callers++
+	peer.mu.Unlock()
+	peer.start()
+	peer.signal()
+	return idle, attempts, revision
+}
+
+func (peer *cameraPeer) endDemand() {
+	peer.mu.Lock()
+	peer.callers--
+	var cancel context.CancelFunc
+	if peer.callers == 0 && !peer.desiredActive && peer.desiredRevision == peer.appliedRevision &&
+		!peer.validatingStop && (peer.sentInstance == "" || peer.sentInstance == peer.appliedInstance || peer.sentRevision != peer.desiredRevision) {
+		cancel = peer.cancelAttempt
+	}
+	peer.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	peer.signal()
+}
+
+// An explicitly requested read or lease may wake an idle peer. Wait for its
+// one fresh discovery attempt so an already-ready source is not refused just
+// because the observer was previously parked. Existing outage backoff still
+// returns unavailable to later callers.
+func (peer *cameraPeer) awaitConnection(ctx context.Context, wasIdle bool, targetAttempt uint64) error {
+	select {
+	case <-peer.first:
+	case <-ctx.Done():
+		return ErrSourceUnavailable
+	}
+	for {
+		peer.mu.Lock()
+		connected, changed, lastError := peer.connected, peer.changed, peer.lastError
+		attempts, attempting, invalidated := peer.attempts, peer.cancelAttempt != nil, peer.invalidated
+		peer.mu.Unlock()
+		if connected {
+			return nil
+		}
+		if !wasIdle || attempts >= targetAttempt && !attempting && !invalidated {
+			return fmt.Errorf("%w: %v", ErrSourceUnavailable, lastError)
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ErrSourceUnavailable
+		}
+	}
+}
 
 func (peer *cameraPeer) call(ctx context.Context, request sourceControlRequest) (sourceControlResponse, []byte, []byte, error) {
 	if peer.source.server.lifecycleContext.Err() != nil {
@@ -112,15 +181,8 @@ func (peer *cameraPeer) call(ctx context.Context, request sourceControlRequest) 
 		return peer.control.call(ctx, request)
 	}
 	lease := request.Operation == "start" || request.Operation == "stop"
-	peer.mu.Lock()
-	if lease && (peer.desiredRevision == 0 || peer.desiredActive != (request.Operation == "start")) {
-		peer.desiredRevision++
-		peer.desiredActive = request.Operation == "start"
-	}
-	revision := peer.desiredRevision
-	peer.mu.Unlock()
-	peer.start()
-	peer.signal()
+	idle, attempts, revision := peer.beginDemand(&request)
+	defer peer.endDemand()
 	// Only the first caller waits for the initial discovery attempt. During an
 	// outage subsequent callers receive an immediate unavailable response.
 	timeout := sourceControlRequestTimeout
@@ -129,10 +191,8 @@ func (peer *cameraPeer) call(ctx context.Context, request sourceControlRequest) 
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	select {
-	case <-peer.first:
-	case <-ctx.Done():
-		return sourceControlResponse{}, nil, nil, ErrSourceUnavailable
+	if err := peer.awaitConnection(ctx, idle, attempts); err != nil {
+		return sourceControlResponse{}, nil, nil, err
 	}
 	for {
 		peer.mu.Lock()
@@ -146,7 +206,7 @@ func (peer *cameraPeer) call(ctx context.Context, request sourceControlRequest) 
 			response, jpeg, rgb, err := peer.control.callBound(ctx, request)
 			var received *sourceControlHTTPError
 			if err != nil && (!errors.As(err, &received) || received.status == 503) {
-				peer.invalidate()
+				peer.invalidate(false)
 			}
 			return response, jpeg, rgb, err
 		}
@@ -266,16 +326,42 @@ func (peer *cameraPeer) run() {
 	suppressed := 0
 	for ctx.Err() == nil {
 		peer.mu.Lock()
-		invalidated, connected := peer.invalidated, peer.connected
+		invalidated, socketChanged, connected := peer.invalidated, peer.socketChanged, peer.connected
 		peer.invalidated = false
+		peer.socketChanged = false
 		peer.mu.Unlock()
+		revalidateStop := false
 		if invalidated {
 			peer.control.close()
 			connected = false
+			// A new native incarnation must receive the last acknowledged stop,
+			// even without a viewer. An absent socket needs no discovery polling.
+			if socketChanged {
+				info, statErr := os.Stat(peer.control.socket)
+				peer.mu.Lock()
+				revalidateStop = statErr == nil && info.Mode()&os.ModeSocket != 0 &&
+					peer.desiredRevision != 0 && !peer.desiredActive
+				peer.mu.Unlock()
+			}
 		}
+		peer.mu.Lock()
+		needed := revalidateStop || peer.desiredActive || peer.callers > 0 || peer.desiredRevision != peer.appliedRevision ||
+			(peer.sentRevision == peer.desiredRevision && peer.sentInstance != "" && peer.sentInstance != peer.appliedInstance)
+		if !connected && !needed {
+			peer.idle = true
+			peer.mu.Unlock()
+			select {
+			case <-ctx.Done():
+			case <-peer.wake:
+			}
+			continue
+		}
+		peer.idle = false
+		peer.mu.Unlock()
 		attemptContext, cancel := context.WithTimeout(ctx, 31*time.Second)
 		peer.mu.Lock()
 		peer.cancelAttempt = cancel
+		peer.validatingStop = revalidateStop
 		if !connected {
 			peer.attempts++
 		}
@@ -289,6 +375,7 @@ func (peer *cameraPeer) run() {
 		cancel()
 		peer.mu.Lock()
 		peer.cancelAttempt = nil
+		peer.validatingStop = false
 		peer.connected = err == nil && !peer.invalidated
 		peer.lastError = err
 		peer.notifyLocked()
@@ -313,6 +400,13 @@ func (peer *cameraPeer) run() {
 		}
 		peer.control.close()
 		peer.observe(sourceControlResponse{}, err)
+		peer.mu.Lock()
+		needed = peer.desiredActive || peer.callers > 0 || peer.desiredRevision != peer.appliedRevision ||
+			(peer.sentRevision == peer.desiredRevision && peer.sentInstance != "" && peer.sentInstance != peer.appliedInstance)
+		peer.mu.Unlock()
+		if !needed {
+			continue
+		}
 		now := time.Now()
 		if lastLog.IsZero() || now.Sub(lastLog) >= 10*time.Second {
 			if output := peer.source.server.settings.Stderr; output != nil {
