@@ -35,8 +35,18 @@ if grep -Eq -- '-source-id|-rtp-listen-address|-source-control-socket|-width|-he
 fi
 test "$(/usr/lib/xgc2-media-edge/mediamtx --version)" = "v1.20.0"
 
-file /usr/bin/xgc-media-edge | tee /tmp/xgc-media-edge-file.txt
-grep -q 'statically linked' /tmp/xgc-media-edge-file.txt
-file /usr/lib/xgc2-media-edge/mediamtx | tee /tmp/xgc-media-edge-mediamtx-file.txt
+if ! command -v readelf >/dev/null; then
+  echo "readelf is required to check installed Media Edge ELF binaries" >&2
+  exit 1
+fi
+readelf -h /usr/bin/xgc-media-edge | tee /tmp/xgc-media-edge-file.txt
+program_headers="$(readelf -l /usr/bin/xgc-media-edge)"
+dynamic_tags="$(readelf -d /usr/bin/xgc-media-edge)"
+if grep -Eq '^[[:space:]]*INTERP[[:space:]]' <<<"${program_headers}" ||
+   grep -Fq '(NEEDED)' <<<"${dynamic_tags}"; then
+  echo "installed Media Edge binary is not statically linked" >&2
+  exit 1
+fi
+readelf -h /usr/lib/xgc2-media-edge/mediamtx | tee /tmp/xgc-media-edge-mediamtx-file.txt
 
 echo "xgc2-media-edge installed smoke test passed (version ${version})."
