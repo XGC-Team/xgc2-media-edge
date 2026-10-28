@@ -35,6 +35,16 @@ fi
 
 mkdir -p "$(dirname "${output}")"
 (
+  cd "${repo_root}/web"
+  if ! npm run verify:build --silent; then
+    if ! node scripts/build-receipt.mjs --check-install || ! npm ls --all --silent >/dev/null; then
+      npm ci --include=dev --no-audit --no-fund
+    fi
+    npm run build
+  fi
+  npm run verify:build --silent
+)
+(
   cd "${repo_root}"
   CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
     go build \
@@ -43,4 +53,5 @@ mkdir -p "$(dirname "${output}")"
       -o "${output}" \
       ./cmd/xgc-media-edge
 )
+node "${repo_root}/web/scripts/build-runtime-receipt.mjs" "${output}" "${goos}" "${goarch}" "${product_version}"
 echo "Built ${output} (${goos}/${goarch}, version ${product_version})"

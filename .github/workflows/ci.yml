@@ -36,7 +36,9 @@ jobs:
               npm --prefix web run check:ui-policy
               npm --prefix web run typecheck
               npm --prefix web run build
+              npm --prefix web run verify:build
               git diff --exit-code -- \
+                internal/mediaedge/player/build-receipt.json \
                 internal/mediaedge/player/player.css \
                 internal/mediaedge/player/player.js
               test -z "$(gofmt -l cmd internal)"

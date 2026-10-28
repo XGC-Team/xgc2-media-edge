@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "builder": "npm run build",
+  "source": [
+    {
+      "path": "web/package-lock.json",
+      "sha256": "2856a2a217fd3b94ee0024d7bd2e594731989027a999d00568d773ad908ae8ac"
+    },
+    {
+      "path": "web/package.json",
+      "sha256": "ffb9c4229f2b77f344249cefc29e54011165c2692de356f571314cf559d6575b"
+    },
+    {
+      "path": "web/scripts/build-receipt.mjs",
+      "sha256": "6aabb79958a102d88f438c118c4aebb623bcb2703ea4437dacf8ad4b645c4080"
+    },
+    {
+      "path": "web/scripts/minify.mjs",
+      "sha256": "f7e0c926a635f904c9f1ffb08cf72281a9e946b573f4bc21745e53af4876aac2"
+    },
+    {
+      "path": "web/src/main.tsx",
+      "sha256": "9fd69868ebdb425723d2d3e654e1fcb6df7b32274f73d7fcba36aa2b2d43bf4d"
+    },
+    {
+      "path": "web/src/styles.css",
+      "sha256": "c9977257bdb7b310037c527aa597a8b2c914d5f7892907ec0fee82784bcd334c"
+    },
+    {
+      "path": "web/tsconfig.json",
+      "sha256": "cc32a3c2be133425d30e112e3dc863c9dbe1ecbbdd81123abf6d6a0300a8ae5c"
+    },
+    {
+      "path": "web/vite.config.ts",
+      "sha256": "318597079b484e234448611a51a34dd720141613690cbc7b6fb64cecdc907f4f"
+    }
+  ],
+  "dependencies": {
+    "@xgc2/ui-react": {
+      "specifier": "https://github.com/XGC-Team/xgc2-ui/releases/download/v0.18.19/xgc2-ui-react-0.18.19.tgz",
+      "lockedVersion": "0.18.19",
+      "installedVersion": "0.18.19",
+      "lockIntegrity": "sha512-Wk/80GD3Lj9dTQRy3iwxVuGaVauEtQxtadx9Z2zVkbZHOQcirvi/sVke9cv6oxhgHPY8UIJ2bSecN7GUHPNudA==",
+      "installedFilesSha256": "f4b26f74be13cfaa2b1868140dcb8ae6fc8a8d82564dc113f326472c712a9089"
+    },
+    "@xgc2/ui-policy": {
+      "specifier": "https://github.com/XGC-Team/xgc2-ui/releases/download/policy-v0.18.19/xgc2-ui-policy-0.18.19.tgz",
+      "lockedVersion": "0.18.19",
+      "installedVersion": "0.18.19",
+      "lockIntegrity": "sha512-2y5igXDs3170j1+fdRbW1MvWGNv6cttylj3dIwgrJwbvI1ryjTsXbkLxlq2DYtCTKkt6IIF8AfW/5VSF7qdCOQ==",
+      "installedFilesSha256": "8fa6ce3dd900e912a892c02ba8baa1854dacf77a5f62ed552c01e171d96a7c15"
+    },
+    "react": {
+      "specifier": "19.2.1",
+      "lockedVersion": "19.2.1",
+      "installedVersion": "19.2.1",
+      "lockIntegrity": "sha512-DGrYcCWK7tvYMnWh79yrPHt+vdx9tY+1gPZa7nJQtO/p8bLTDaHp4dzwEhQB7pZ4Xe3ok4XKuEPrVuc+wlpkmw==",
+      "installedFilesSha256": "d878baf67ff0109294a99cb20d71b4f28b9e13b3b89e9822360c29f338db3fea"
+    },
+    "react-dom": {
+      "specifier": "19.2.1",
+      "lockedVersion": "19.2.1",
+      "installedVersion": "19.2.1",
+      "lockIntegrity": "sha512-ibrK8llX2a4eOskq1mXKu/TGZj9qzomO+sNfO98M6d9zIPOEhlBkMkBUBLd1vgS0gQsLDBzA+8jJBVXDnfHmJg==",
+      "installedFilesSha256": "888c10559631f984925da2c11a8684d53b41f5194516199ab33a6051de7d55a4"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "internal/mediaedge/player/player.css",
+      "sha256": "4854445158b9c644a36514bba3db33322b8a6f006553599248f8d36c247ac2db"
+    },
+    {
+      "path": "internal/mediaedge/player/player.js",
+      "sha256": "47e86656518b546b51eab16426a6be5fd6ee16af3e5ecbbf8f5ce0f5eac0fddf"
+    }
+  ]
+}

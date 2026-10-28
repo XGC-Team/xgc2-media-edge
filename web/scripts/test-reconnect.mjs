@@ -24,7 +24,11 @@ Math.random = () => {
   seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
   return seed / 2 ** 32
 }
-globalThis.document = { getElementById: () => ({ dataset: { sourceId: 'camera' } }) }
+const documentEvents = new Map()
+const windowEvents = new Map()
+globalThis.document = { hidden: false, cookie: '', getElementById: () => ({ dataset: { sourceId: 'camera' } }),
+  addEventListener: (name, listener) => documentEvents.set(name, listener),
+  removeEventListener: name => documentEvents.delete(name) }
 globalThis.window = {
   setTimeout(callback, delay) {
     const timer = setTimeout(() => { timers.delete(timer); callback() }, delay)
@@ -33,7 +37,8 @@ globalThis.window = {
     return timer
   },
   clearTimeout(timer) { clearTimeout(timer); timers.delete(timer) },
-  addEventListener() {}, removeEventListener() {},
+  addEventListener: (name, listener) => windowEvents.set(name, listener),
+  removeEventListener: name => windowEvents.delete(name),
 }
 globalThis.fetch = async (path, options) => {
   if (options.method === 'DELETE') { pending.delete(path.split('/').at(-1)); return { ok: true } }
@@ -63,6 +68,7 @@ globalThis.RTCPeerConnection = class {
   close() { this.connectionState = 'closed'; this.listeners.get('connectionstatechange')?.() }
 }
 const jsx = (type, props) => ({ type, props })
+let skinStore
 const react = {
   useRef: value => ({ current: value }),
   useCallback: value => value,
@@ -77,11 +83,14 @@ const requireMock = name => {
   if (name === 'react') return react
   if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx }
   if (name === 'react-dom/client') return { createRoot: () => ({ render: element => element.type() }) }
-  if (name === '@xgc2/ui-react') return { initializeSkin() {}, useSkin: () => ['dark', () => {}] }
+  if (name === '@xgc2/ui-react') return { initializeSkin: options => { skinStore = options.store }, useSkin: () => ['dark', () => {}] }
   if (name.endsWith('.css')) return {}
   throw new Error(`Unexpected import ${name}`)
 }
 new Function('require', 'exports', compiled)(requireMock, {})
+assert.equal(skinStore.getSnapshot(), 'dark')
+await skinStore.setSkin('light')
+assert.equal(skinStore.getSnapshot(), 'light')
 for (const effect of effects) cleanups.push(effect())
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const resources = () => ({ fds: readdirSync('/proc/self/fd').length, threads: readdirSync('/proc/self/task').length })
@@ -112,6 +121,28 @@ try {
   assert.equal(maxInFlight, 1)
   assert.equal(timers.size, 0)
   console.log('Viewer recovered automatically with one session')
+  document.hidden = true
+  documentEvents.get('visibilitychange')()
+  await sleep(20)
+  const hiddenAttempts = attempts
+  assert.equal(pending.size, 0)
+  assert.equal(timers.size, 0)
+  assert.equal(state[1], 'Paused')
+  await sleep(100)
+  assert.equal(attempts, hiddenAttempts)
+  document.hidden = false
+  documentEvents.get('visibilitychange')()
+  const resumed = Date.now() + 2_000
+  while (state[0] !== 'connected' && Date.now() < resumed) await sleep(10)
+  assert.equal(state[0], 'connected')
+  assert.equal(pending.size, 1)
+  windowEvents.get('pagehide')()
+  await sleep(20)
+  assert.equal(pending.size, 0)
+  windowEvents.get('pageshow')()
+  const shown = Date.now() + 2_000
+  while (pending.size !== 1 && Date.now() < shown) await sleep(10)
+  assert.equal(pending.size, 1)
 } finally {
   for (const cleanup of cleanups) cleanup?.()
   Math.random = originalRandom

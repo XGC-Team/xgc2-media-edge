@@ -9,6 +9,8 @@ import {
   StatusText,
   Topbar,
   initializeSkin,
+  type SkinStore,
+  type XGCSkin,
   useSkin,
 } from '@xgc2/ui-react'
 import '@xgc2/ui-react/styles.css'
@@ -16,10 +18,27 @@ import './styles.css'
 
 type SessionState = 'starting' | 'connected' | 'error'
 
-const skinOptions = {
-  defaultSkin: 'dark',
-  storageKey: 'xgc2-media-edge.skin',
-} as const
+const skinCookie = 'xgc2-media-edge-skin'
+function readPlayerSkin(): XGCSkin | undefined {
+  const value = document.cookie.split(';').map(part => part.trim())
+    .find(part => part.startsWith(`${skinCookie}=`))?.slice(skinCookie.length + 1)
+  return value === 'light' || value === 'dark' ? value : undefined
+}
+function createPlayerSkinStore(): SkinStore {
+  let current = readPlayerSkin() ?? 'dark'
+  const listeners = new Set<() => void>()
+  return {
+    getSnapshot: () => current,
+    subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener) },
+    setSkin: async next => {
+      document.cookie = `${skinCookie}=${next}; Path=/; Max-Age=31536000; SameSite=Strict`
+      if (readPlayerSkin() !== next) throw new Error('The appearance setting could not be saved.')
+      current = next
+      listeners.forEach(listener => listener())
+    },
+  }
+}
+const skinOptions = { store: createPlayerSkinStore() }
 
 initializeSkin(skinOptions)
 
@@ -38,6 +57,7 @@ function App() {
   const retryRef = useRef<number | null>(null)
   const backoffRef = useRef(250)
   const mountedRef = useRef(false)
+  const pageActiveRef = useRef(true)
   const inFlightRef = useRef(false)
   const connectRef = useRef<(() => Promise<void>) | null>(null)
   const [skin, setSkin] = useSkin(skinOptions)
@@ -45,6 +65,7 @@ function App() {
   const [stateLabel, setStateLabel] = useState('Connecting')
   const [message, setMessage] = useState('Negotiating a direct WebRTC session…')
   const [connecting, setConnecting] = useState(true)
+  const [appearanceError, setAppearanceError] = useState('')
 
   const closeSession = useCallback(() => {
     if (retryRef.current !== null) window.clearTimeout(retryRef.current)
@@ -66,7 +87,7 @@ function App() {
   }, [])
 
   const scheduleRetry = useCallback(() => {
-    if (!mountedRef.current || retryRef.current !== null) return
+    if (!mountedRef.current || !pageActiveRef.current || document.hidden || retryRef.current !== null) return
     const delay = Math.random() * backoffRef.current
     backoffRef.current = Math.min(30_000, backoffRef.current * 2)
     retryRef.current = window.setTimeout(() => {
@@ -76,6 +97,7 @@ function App() {
   }, [])
 
   const connect = useCallback(async () => {
+    if (!mountedRef.current || !pageActiveRef.current || document.hidden) return
     if (inFlightRef.current) {
       scheduleRetry()
       return
@@ -168,12 +190,31 @@ function App() {
 
   useEffect(() => {
     mountedRef.current = true
+    pageActiveRef.current = true
     connectRef.current = connect
-    void connect()
-    window.addEventListener('pagehide', closeSession)
+    const visibilityChanged = () => {
+      if (document.hidden) {
+        closeSession()
+        setConnecting(false)
+        setSessionState('starting')
+        setStateLabel('Paused')
+        setMessage('Preview is paused while this page is hidden.')
+      } else if (pageActiveRef.current) {
+        backoffRef.current = 250
+        void connect()
+      }
+    }
+    const pageHidden = () => { pageActiveRef.current = false; closeSession() }
+    const pageShown = () => { pageActiveRef.current = true; visibilityChanged() }
+    document.addEventListener('visibilitychange', visibilityChanged)
+    window.addEventListener('pagehide', pageHidden)
+    window.addEventListener('pageshow', pageShown)
+    visibilityChanged()
     return () => {
       mountedRef.current = false
-      window.removeEventListener('pagehide', closeSession)
+      document.removeEventListener('visibilitychange', visibilityChanged)
+      window.removeEventListener('pagehide', pageHidden)
+      window.removeEventListener('pageshow', pageShown)
       closeSession()
     }
   }, [closeSession, connect])
@@ -187,12 +228,17 @@ function App() {
         <Topbar
           brand={<ProductBrand product="Media Edge" />}
           actions={(
-            <SegmentedControl
-              ariaLabel="Appearance"
-              value={skin}
-              options={[{ label: 'Light', value: 'light' }, { label: 'Dark', value: 'dark' }]}
-              onValueChange={(value) => setSkin(value as typeof skin)}
-            />
+            <>
+              <SegmentedControl
+                ariaLabel="Appearance"
+                value={skin}
+                options={[{ label: 'Light', value: 'light' }, { label: 'Dark', value: 'dark' }]}
+                onValueChange={(value) => {
+                  void setSkin(value as typeof skin).then(() => setAppearanceError(''), () => setAppearanceError('The appearance setting could not be saved.'))
+                }}
+              />
+              {appearanceError ? <span role="alert">{appearanceError}</span> : null}
+            </>
           )}
         />
       )}
