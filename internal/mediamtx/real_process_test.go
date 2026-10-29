@@ -16,7 +16,7 @@ const realMediaMTXExecutableEnv = "XGC2_MEDIAMTX_TEST_EXECUTABLE"
 
 // TestRealMediaMTXStartsInUnprivilegedProbe is compiled into the package
 // readiness probe by verify_unprivileged_mediamtx.sh. Product config tests own
-// the 8 MiB receive-buffer default; this probe deliberately sets the upstream
+// the 4 MiB receive-buffer request; this probe deliberately sets the upstream
 // binary to the OS default because its no-capability container cannot raise the
 // host rmem_max deployment prerequisite.
 func TestRealMediaMTXStartsInUnprivilegedProbe(t *testing.T) {

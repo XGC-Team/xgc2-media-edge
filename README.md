@@ -48,14 +48,11 @@ the connection path.
 
 ### UDP receive-buffer contract
 
-The generated MediaMTX configuration requests `udpReadBufferSize: 8388608`
-(8 MiB). A 4K H264 frame is fragmented across many loopback RTP packets; the
-ordinary Linux 208 KiB receive queue loses FU-A fragments when motion increases
-the encoded frame burst, even when the source camera itself remains at 30 Hz.
-Deployments must therefore set `net.core.rmem_max >= 8388608` before Edge opens
-its RTP socket. XGC2 local-fleet owns that host-network setup explicitly and
-fails its runtime status check when the contract is absent. Edge still does not
-auto-tune or silently retry with a different value.
+The generated MediaMTX configuration requests `udpReadBufferSize: 4194304`
+(4 MiB). The host must permit this explicit request. Edge does not change host
+sysctls or silently retry with a smaller queue. Qualify each source with
+high-entropy motion, socket drops and end-to-end presentation delay; a successful
+startup alone does not establish sufficient queue capacity.
 
 Size the queue from a bounded encoder, never from a static-scene FPS reading.
 For one RTP source, a conservative userspace request is
@@ -71,15 +68,11 @@ bytes per datagram, `Hrtp-ip-udp` is the corresponding header bytes, and `S`
 is the safety factor. Without explicit `maxrate` and `VBVbits`, nominal average
 bitrate provides no finite burst bound and this calculation is invalid.
 
-The local-fleet 4K30 contract uses `Rmax = VBVbits = 25,000,000`,
-`Tsched = 0.1 s`, `Prtp = 1200`, approximately 40 header bytes, and `S = 2`:
-the result is about 7.1 MB, rounded up to 8 MiB. Linux may report roughly twice
-the requested value in `ss -m` because of kernel accounting; do not multiply
-the engineering requirement by that reporting convention. Each source owns a
-separate socket queue, and the kernel consumes the capacity on demand rather
-than reserving the full maximum for every idle source.
+Linux may report roughly twice the requested value because of kernel accounting;
+do not multiply the engineering requirement by that reporting convention. Each
+source owns a separate socket queue, consumed on demand.
 
-Every Debian package matrix entry proves this contract with the real bundled
+Every Debian package matrix entry probes startup with the real bundled
 MediaMTX binary. The automated probe extracts that binary, runs it as numeric
 UID/GID 65532 with all Linux capabilities dropped, no external network, a
 read-only root filesystem, and `no-new-privileges`, then waits for the actual
@@ -87,7 +80,7 @@ MediaMTX API to report the configured RTP path. No mock process or readiness
 response is used. That deliberately isolated binary probe sets only its
 temporary MediaMTX config to the OS-default queue because it cannot raise the
 host `rmem_max`; source config tests independently keep the product default at
-8 MiB, and each deployment still proves the host prerequisite before startup.
+4 MiB, and each deployment still proves the host prerequisite before startup.
 
 ## Browser surface
 
