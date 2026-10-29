@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { readdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { relative, resolve } from 'node:path'
+import { dirname, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const productRoot = resolve(import.meta.dirname, '../..')
+const here = dirname(fileURLToPath(import.meta.url))
+const productRoot = resolve(here, '../..')
 const [output, os, architecture, version] = process.argv.slice(2)
 if (!output || !os || !architecture || !version || process.argv.length !== 6) {
   throw new Error('Usage: node build-runtime-receipt.mjs OUTPUT OS ARCH VERSION')
@@ -21,7 +23,7 @@ async function filesIn(path) {
   return result.sort()
 }
 const sources = [resolve(productRoot, 'go.mod'), resolve(productRoot, 'go.sum'),
-  resolve(productRoot, '.xgc2/scripts/build.sh'), resolve(import.meta.dirname, 'build-runtime-receipt.mjs'),
+  resolve(productRoot, '.xgc2/scripts/build.sh'), resolve(here, 'build-runtime-receipt.mjs'),
   ...await filesIn(resolve(productRoot, 'cmd')), ...await filesIn(resolve(productRoot, 'internal'))]
 const source = await Promise.all(sources.sort().map(async path => ({ path: relative(productRoot, path), sha256: await fileHash(path) })))
 const webReceipt = resolve(productRoot, 'internal/mediaedge/player/build-receipt.json')

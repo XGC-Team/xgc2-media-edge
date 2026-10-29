@@ -11,8 +11,12 @@ bash -n .xgc2/scripts/*.sh
 export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-/tmp/xgc2-media-edge-pycache}"
 python3 -m py_compile \
   .xgc2/scripts/check_manifest_contract.py \
-  .xgc2/scripts/xgc2_artifact_manifest.py
+  .xgc2/scripts/verify_web_receipt.py \
+  .xgc2/scripts/xgc2_artifact_manifest.py \
+  tests/check_web_receipt.py
 python3 .xgc2/scripts/check_manifest_contract.py
+python3 .xgc2/scripts/verify_web_receipt.py
+python3 tests/check_web_receipt.py
 
 if grep -ERn \
   'xgc2\.build-artifact\.v2|run_cpp_quality|run_source_tests|actions/(checkout|setup-node|setup-go|upload-artifact)@v[0-9]' \
@@ -45,7 +49,9 @@ required_files=(
   .xgc2/scripts/check_package_compliance.sh
   .xgc2/scripts/smoke_test_installed.sh
   .xgc2/scripts/verify_unprivileged_mediamtx.sh
+  .xgc2/scripts/verify_web_receipt.py
   .xgc2/scripts/xgc2_artifact_manifest.py
+  tests/check_web_receipt.py
   LICENSE
   README.md
   cmd/xgc-media-edge/main.go

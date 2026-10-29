@@ -459,6 +459,15 @@ The frontend build writes deterministic `player.js` and `player.css` assets
 beside the Go HTML template. Commit those generated files with their React
 source. CI rebuilds them from the immutable shared package and rejects drift.
 
+The React player is architecture-independent and is produced once by the Noble
+Web builder. Target Debian builders never compile the frontend: `build_deb.sh`
+runs `build.sh` with `XGC2_MEDIA_EDGE_WEB=verify`, which checks the committed
+receipt against the Web source, lock file and embedded artifacts with the
+portable Python verifier (`.xgc2/scripts/verify_web_receipt.py`) and fails
+closed on drift. Use `XGC2_MEDIA_EDGE_WEB=verify` by hand only when the
+committed player is current; the default `build` mode still requires Node
+22.12+ for Vite and the shared UI packages.
+
 The development build is written to `.ci/bin/xgc-media-edge`. This source build
 is the intended integration-test input while the interfaces are under active
 development; Debian packages are the production artifact.

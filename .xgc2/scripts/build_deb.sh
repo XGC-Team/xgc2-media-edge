@@ -54,7 +54,11 @@ pkg_root="${work_dir}/pkg/${package_name}"
 binary="${work_dir}/xgc-media-edge"
 mediamtx_root="${work_dir}/mediamtx"
 
-GOOS=linux GOARCH="${arch}" XGC2_MEDIA_EDGE_OUTPUT="${binary}" \
+# The player is architecture-independent and was produced by the maintained
+# Noble Web builder with its receipt committed. A target builder only verifies
+# those exact bytes and compiles the Go binary for its own libc/arch; the
+# legacy target image's Node version never compiles the frontend.
+GOOS=linux GOARCH="${arch}" XGC2_MEDIA_EDGE_WEB=verify XGC2_MEDIA_EDGE_OUTPUT="${binary}" \
   "${repo_root}/.xgc2/scripts/build.sh"
 "${repo_root}/.xgc2/scripts/fetch_mediamtx.sh" "${arch}" "${mediamtx_root}"
 
